@@ -1,0 +1,24 @@
+# Binaries
+proxmox-k3s
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build and release output
+dist/
+
+# Local runtime/config artifacts
+cluster.yaml
+kubeconfig
+
+# Go test coverage
+coverage.out
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

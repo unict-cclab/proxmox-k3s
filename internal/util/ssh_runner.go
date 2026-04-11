@@ -1,0 +1,117 @@
+package util
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+)
+
+type Runner struct {
+	client *ssh.Client
+	host   string
+}
+
+func Dial(host string, port int, user, keyPath, password string) (*Runner, error) {
+	authMethods := buildAuthMethods(keyPath, password)
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no SSH authentication method available")
+	}
+
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         15 * time.Second,
+	}
+
+	addr := fmt.Sprintf("%s:%d", host, port)
+	client, err := ssh.Dial("tcp", addr, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("SSH dial %s: %w", addr, err)
+	}
+	return &Runner{client: client, host: host}, nil
+}
+
+func DialWithKey(host string, port int, user, keyPath string) (*Runner, error) {
+	return Dial(host, port, user, keyPath, "")
+}
+
+func (r *Runner) Close() error { return r.client.Close() }
+
+func (r *Runner) Run(cmd string, out io.Writer) error {
+	sess, err := r.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("new SSH session: %w", err)
+	}
+	defer sess.Close()
+
+	sess.Stdout = out
+	sess.Stderr = out
+
+	if err := sess.Run(cmd); err != nil {
+		return fmt.Errorf("command %q on %s: %w", cmd, r.host, err)
+	}
+	return nil
+}
+
+func (r *Runner) Output(cmd string) (string, error) {
+	var buf bytes.Buffer
+	if err := r.Run(cmd, &buf); err != nil {
+		return buf.String(), err
+	}
+	return strings.TrimSpace(buf.String()), nil
+}
+
+func (r *Runner) Runf(out io.Writer, format string, args ...any) error {
+	return r.Run(fmt.Sprintf(format, args...), out)
+}
+
+func WaitForSSH(host string, port int, user, keyPath string, timeout time.Duration) (*Runner, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		r, err := DialWithKey(host, port, user, keyPath)
+		if err == nil {
+			return r, nil
+		}
+		lastErr = err
+		time.Sleep(5 * time.Second)
+	}
+	if lastErr == nil {
+		return nil, fmt.Errorf("SSH to %s not available after %s", host, timeout)
+	}
+	return nil, fmt.Errorf("SSH to %s not available after %s; last error: %w", host, timeout, lastErr)
+}
+
+func buildAuthMethods(keyPath, password string) []ssh.AuthMethod {
+	var methods []ssh.AuthMethod
+
+	if keyPath != "" {
+		if signer, err := signerFromFile(keyPath); err == nil {
+			methods = append(methods, ssh.PublicKeys(signer))
+		}
+	}
+	if agentConn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
+		methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
+	}
+	if password != "" {
+		methods = append(methods, ssh.Password(password))
+	}
+
+	return methods
+}
+
+func signerFromFile(path string) (ssh.Signer, error) {
+	key, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return ssh.ParsePrivateKey(key)
+}

@@ -1,0 +1,88 @@
+# proxmox-k3s cluster configuration
+# Only proxmox.api_url, token_id, and token_secret are required.
+# Everything else has sensible defaults.
+
+cluster_name: my-cluster          # default: "k3s-cluster"
+kubeconfig_path: ./kubeconfig     # where to write the kubeconfig after creation
+
+proxmox:
+  api_url: https://192.168.1.10:8006/api2/json
+  token_id: root@pam!mytoken
+  token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  insecure_tls: true              # accept self-signed PVE certs (common in homelabs)
+
+# VM template built once and reused for all cluster VMs.
+template:
+  # name: ubuntu-24.04-k3s-base  # optional: share one template across multiple clusters
+  proxmox_node: pve1              # which PVE node builds the template
+  storage: local-lvm              # storage pool for the template disk
+  # image_storage: local          # optional staging storage for downloaded cloud images; needed for Ceph/RBD
+  cloud_init_storage: local-lvm   # storage for the cloud-init disk; must support "images"
+  os: ubuntu-24.04                # resolves to the official Ubuntu cloud image
+  # cloud_image_url: https://...  # override: bring your own cloud image
+
+# Defaults applied to all nodes unless overridden per pool.
+node_defaults:
+  proxmox_node: pve1
+  storage: local-lvm              # VM disk storage — works with lvm-thin, zfs, ceph, dir
+  cores: 2
+  memory: 2048                    # MB
+  disk_size: 20                   # GB
+  bridge: vmbr0
+
+# k3s installation options.
+k3s:
+  version: v1.32.3+k3s1           # leave empty to auto-detect latest stable
+  extra_server_args: "--disable=traefik --disable=servicelb"
+  # extra_agent_args: ""
+
+# Static networking (optional — leave this section out to use DHCP).
+# When using DHCP, VM IPs are discovered via the QEMU guest agent after boot.
+# networking:
+#   gateway: 192.168.1.1
+#   dns: 1.1.1.1
+#   subnet_mask: 24               # CIDR prefix length
+
+# Control plane nodes: 1 (standalone) or 3 (HA with embedded etcd).
+control_plane:
+  count: 1
+  # proxmox_node: pve1            # override node_defaults.proxmox_node
+  # proxmox_nodes:                # per-VM node placement (index matches VM number)
+  #   - pve1                      # cp-01 → pve1
+  #   - pve2                      # cp-02 → pve2
+  #   - pve3                      # cp-03 → pve3
+  # storage: local-lvm
+  cores: 2
+  memory: 4096
+  disk_size: 20
+  # ip_start: 192.168.1.100       # first CP gets .100, second .101, etc.
+
+# Worker node pools (can define multiple with different specs/storage).
+worker_pools:
+  - name: workers
+    count: 2
+    # proxmox_node: pve1          # default for all VMs in this pool
+    # proxmox_nodes:              # per-VM override (falls back to proxmox_node)
+    #   - pve1
+    #   - pve2
+    # storage: local-lvm
+    cores: 4
+    memory: 4096
+    disk_size: 40
+    # ip_start: 192.168.1.110
+    labels:
+      - "nodepool=workers"
+    taints: []
+
+  # Example: a second pool on different storage (e.g. Ceph)
+  # - name: storage-nodes
+  #   count: 2
+  #   proxmox_node: pve2
+  #   storage: ceph-pool          # any storage pool name known to Proxmox
+  #   cores: 8
+  #   memory: 16384
+  #   disk_size: 200
+  #   labels:
+  #     - "nodepool=storage"
+  #   taints:
+  #     - "nodepool=storage:NoSchedule"

@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build release archives
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          mkdir -p dist
+
+          build() {
+            local goos="$1"
+            local goarch="$2"
+            local ext="$3"
+            local bin_name="proxmox-k3s${ext}"
+            local dir="dist/proxmox-k3s_${VERSION}_${goos}_${goarch}"
+
+            mkdir -p "${dir}"
+            GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
+              go build -ldflags="-s -w" -o "${dir}/${bin_name}" ./cmd/main.go
+
+            cp README.md "${dir}/README.md"
+            cp cluster.example.yaml "${dir}/cluster.example.yaml"
+
+            if [ "${goos}" = "windows" ]; then
+              (cd dist && zip -r "proxmox-k3s_${VERSION}_${goos}_${goarch}.zip" "$(basename "${dir}")")
+            else
+              tar -C dist -czf "dist/proxmox-k3s_${VERSION}_${goos}_${goarch}.tar.gz" "$(basename "${dir}")"
+            fi
+          }
+
+          build linux amd64 ""
+          build linux arm64 ""
+          build darwin amd64 ""
+          build darwin arm64 ""
+          build windows amd64 ".exe"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
