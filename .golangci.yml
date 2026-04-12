@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - misspell
+    - gochecknoinits
+    - nilerr
+    - bodyclose
+
+linters-settings:
+  misspell:
+    locale: US
+
+issues:
+  max-same-issues: 0

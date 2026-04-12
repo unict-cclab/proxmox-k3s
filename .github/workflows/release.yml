@@ -41,7 +41,7 @@ jobs:
 
             mkdir -p "${dir}"
             GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
-              go build -ldflags="-s -w" -o "${dir}/${bin_name}" ./cmd/main.go
+              go build -ldflags="-s -w -X main.version=${VERSION}" -o "${dir}/${bin_name}" ./cmd/main.go
 
             cp README.md "${dir}/README.md"
             cp cluster.example.yaml "${dir}/cluster.example.yaml"
@@ -59,9 +59,15 @@ jobs:
           build darwin arm64 ""
           build windows amd64 ".exe"
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip > sha256sums.txt
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/sha256sums.txt

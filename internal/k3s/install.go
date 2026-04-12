@@ -18,6 +18,8 @@ const (
 	k3sInstallScript  = "https://get.k3s.io"
 	defaultSSHUser    = "ubuntu"
 	sshBootTimeout    = 5 * time.Minute
+	joinTokenTimeout  = 2 * time.Minute
+	kubeconfigTimeout = 2 * time.Minute
 	k3sTokenPath      = "/var/lib/rancher/k3s/server/token"
 	k3sNodeTokenPath  = "/var/lib/rancher/k3s/server/node-token"
 	k3sKubeconfigPath = "/etc/rancher/k3s/k3s.yaml"
@@ -71,7 +73,7 @@ func (i *Installer) InstallFirstServer(node *NodeInfo, ha bool) (token string, e
 		return "", err
 	}
 
-	token, err = i.readJoinToken(node)
+	token, err = i.waitForJoinToken(node)
 	if err != nil {
 		return "", fmt.Errorf("reading node token from %s: %w", node.Name, err)
 	}
@@ -132,9 +134,13 @@ func (i *Installer) ApplyNodeLabels(cpNode *NodeInfo, nodeName string, labels, t
 }
 
 func (i *Installer) FetchKubeconfig(node *NodeInfo, externalIP, clusterName string) (string, error) {
-	raw, err := node.Runner.Output("sudo cat " + k3sKubeconfigPath)
+	raw, err := i.waitForKubeconfig(node)
 	if err != nil {
 		return "", fmt.Errorf("reading kubeconfig from %s: %w", node.Name, err)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("reading kubeconfig from %s: empty kubeconfig", node.Name)
 	}
 
 	kc := strings.ReplaceAll(raw, "https://127.0.0.1:6443", "https://"+externalIP+":6443")
@@ -142,6 +148,9 @@ func (i *Installer) FetchKubeconfig(node *NodeInfo, externalIP, clusterName stri
 	kc = strings.ReplaceAll(kc, "cluster: default", "cluster: "+clusterName)
 	kc = strings.ReplaceAll(kc, "user: default", "user: "+clusterName)
 	kc = strings.ReplaceAll(kc, "current-context: default", "current-context: "+clusterName)
+	if strings.TrimSpace(kc) == "" {
+		return "", fmt.Errorf("rewriting kubeconfig for %s produced empty output", node.Name)
+	}
 	return kc, nil
 }
 
@@ -240,6 +249,52 @@ func (i *Installer) readJoinToken(node *NodeInfo) (string, error) {
 	cmd := fmt.Sprintf(`if sudo test -s %s; then sudo cat %s; elif sudo test -s %s; then sudo cat %s; fi`,
 		k3sTokenPath, k3sTokenPath, k3sNodeTokenPath, k3sNodeTokenPath)
 	return node.Runner.Output(cmd)
+}
+
+func (i *Installer) waitForJoinToken(node *NodeInfo) (string, error) {
+	deadline := time.Now().Add(joinTokenTimeout)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		token, err := i.readJoinToken(node)
+		if err == nil {
+			token = strings.TrimSpace(token)
+			if token != "" {
+				return token, nil
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("join token not available after %s; last error: %w", joinTokenTimeout, lastErr)
+	}
+	return "", fmt.Errorf("join token not available after %s", joinTokenTimeout)
+}
+
+func (i *Installer) waitForKubeconfig(node *NodeInfo) (string, error) {
+	deadline := time.Now().Add(kubeconfigTimeout)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		raw, err := node.Runner.Output(fmt.Sprintf(`if sudo test -s %s; then sudo cat %s; fi`, k3sKubeconfigPath, k3sKubeconfigPath))
+		if err == nil {
+			raw = strings.TrimSpace(raw)
+			if raw != "" {
+				return raw, nil
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("kubeconfig not available after %s; last error: %w", kubeconfigTimeout, lastErr)
+	}
+	return "", fmt.Errorf("kubeconfig not available after %s", kubeconfigTimeout)
 }
 
 func (i *Installer) ensureServerRole(node *NodeInfo) error {

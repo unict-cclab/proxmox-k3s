@@ -7,10 +7,15 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/amarchese96/proxmox-k3s/api"
+	"github.com/amarchese96/proxmox-k3s/internal/cluster"
 	"github.com/amarchese96/proxmox-k3s/internal/config"
+	pxclient "github.com/amarchese96/proxmox-k3s/internal/proxmox"
 	"github.com/amarchese96/proxmox-k3s/internal/ui"
+	"github.com/amarchese96/proxmox-k3s/internal/util"
 )
+
+// version is set at build time via -ldflags "-X main.version=<tag>".
+var version = "dev"
 
 func main() {
 	if err := rootCmd().Execute(); err != nil {
@@ -19,23 +24,23 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
-	svc := api.New()
 	root := &cobra.Command{
-		Use:   "proxmox-k3s",
-		Short: "Provision and manage k3s clusters on Proxmox VE",
-		Long:  `proxmox-k3s creates production-ready k3s clusters on Proxmox VE with a single config file and a single command.`,
+		Use:     "proxmox-k3s",
+		Short:   "Provision and manage k3s clusters on Proxmox VE",
+		Long:    `proxmox-k3s creates production-ready k3s clusters on Proxmox VE with a single config file and a single command.`,
+		Version: version,
 	}
 
 	root.AddCommand(
-		createCmd(svc),
-		deleteCmd(svc),
-		kubeconfigCmd(svc),
-		templateCmd(svc),
+		createCmd(),
+		deleteCmd(),
+		kubeconfigCmd(),
+		templateCmd(),
 	)
 	return root
 }
 
-func createCmd(svc *api.Service) *cobra.Command {
+func createCmd() *cobra.Command {
 	var configPath string
 
 	cmd := &cobra.Command{
@@ -50,7 +55,7 @@ detected and skipped, so re-running after a partial failure is safe.`,
 			if err != nil {
 				return err
 			}
-			return svc.CreateCluster(context.Background(), cfg, os.Stdout)
+			return cluster.Create(context.Background(), cfg, os.Stdout)
 		},
 	}
 
@@ -58,7 +63,7 @@ detected and skipped, so re-running after a partial failure is safe.`,
 	return cmd
 }
 
-func deleteCmd(svc *api.Service) *cobra.Command {
+func deleteCmd() *cobra.Command {
 	var (
 		configPath     string
 		deleteTemplate bool
@@ -85,7 +90,7 @@ is fast; pass --template to remove it too.`,
 				return nil
 			}
 
-			return svc.DeleteCluster(context.Background(), cfg, deleteTemplate, os.Stdout)
+			return cluster.Delete(context.Background(), cfg, deleteTemplate, os.Stdout)
 		},
 	}
 
@@ -94,7 +99,7 @@ is fast; pass --template to remove it too.`,
 	return cmd
 }
 
-func kubeconfigCmd(svc *api.Service) *cobra.Command {
+func kubeconfigCmd() *cobra.Command {
 	var configPath string
 
 	cmd := &cobra.Command{
@@ -107,7 +112,59 @@ func kubeconfigCmd(svc *api.Service) *cobra.Command {
 				return err
 			}
 
-			return svc.RefreshKubeconfig(context.Background(), cfg, os.Stdout)
+			stateDir, err := config.StateDirForCluster(cfg.ClusterName)
+			if err != nil {
+				return err
+			}
+
+			keyPair, err := util.EnsureKeyPair(stateDir)
+			if err != nil {
+				return err
+			}
+
+			px, err := pxclient.New(cfg)
+			if err != nil {
+				return err
+			}
+
+			cpName := config.PrefixedNodeName(cfg.ClusterName, cfg.ControlPlane[0].Name)
+			vm, err := px.FindVMByName(context.Background(), cpName)
+			if err != nil || vm == nil {
+				return fmt.Errorf("control-plane VM %q not found; has the cluster been created?", cpName)
+			}
+
+			ip := cfg.ControlPlane[0].IP
+			if ip == "" {
+				ip, err = pxclient.WaitForIP(context.Background(), vm, 30e9)
+				if err != nil {
+					return fmt.Errorf("getting CP IP: %w", err)
+				}
+			}
+
+			runner, err := util.DialWithKey(ip, 22, "ubuntu", keyPair.PrivateKeyPath)
+			if err != nil {
+				return fmt.Errorf("SSH to %s: %w", ip, err)
+			}
+			defer runner.Close()
+
+			raw, err := runner.Output("sudo cat /etc/rancher/k3s/k3s.yaml")
+			if err != nil {
+				return fmt.Errorf("reading kubeconfig: %w", err)
+			}
+			if raw == "" {
+				return fmt.Errorf("reading kubeconfig: empty kubeconfig")
+			}
+
+			kubeconfig := rewriteKubeconfig(raw, ip, cfg.ClusterName)
+			if kubeconfig == "" {
+				return fmt.Errorf("rewriting kubeconfig: empty kubeconfig")
+			}
+			if err := os.WriteFile(cfg.KubeconfigPath, []byte(kubeconfig), 0600); err != nil {
+				return fmt.Errorf("writing kubeconfig: %w", err)
+			}
+
+			fmt.Fprintf(os.Stdout, "Kubeconfig saved to %s\n", cfg.KubeconfigPath)
+			return nil
 		},
 	}
 
@@ -115,7 +172,7 @@ func kubeconfigCmd(svc *api.Service) *cobra.Command {
 	return cmd
 }
 
-func templateCmd(svc *api.Service) *cobra.Command {
+func templateCmd() *cobra.Command {
 	var configPath string
 
 	cmd := &cobra.Command{
@@ -131,7 +188,19 @@ func templateCmd(svc *api.Service) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return svc.CreateTemplate(context.Background(), cfg, os.Stdout)
+			stateDir, err := config.StateDirForCluster(cfg.ClusterName)
+			if err != nil {
+				return err
+			}
+			keyPair, err := util.EnsureKeyPair(stateDir)
+			if err != nil {
+				return err
+			}
+			px, err := pxclient.New(cfg)
+			if err != nil {
+				return err
+			}
+			return pxclient.EnsureTemplate(context.Background(), px, cfg, keyPair.PrivateKeyPath, keyPair.PublicKey, os.Stdout)
 		},
 	}
 
@@ -143,7 +212,11 @@ func templateCmd(svc *api.Service) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return svc.DeleteTemplate(context.Background(), cfg, os.Stdout)
+			px, err := pxclient.New(cfg)
+			if err != nil {
+				return err
+			}
+			return pxclient.DeleteTemplate(context.Background(), px, cfg, os.Stdout)
 		},
 	}
 
@@ -151,4 +224,40 @@ func templateCmd(svc *api.Service) *cobra.Command {
 	deleteSub.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
 	cmd.AddCommand(createSub, deleteSub)
 	return cmd
+}
+
+func rewriteKubeconfig(raw, ip, clusterName string) string {
+	r := raw
+	r = replaceAll(r, "https://127.0.0.1:6443", "https://"+ip+":6443")
+	r = replaceAll(r, "name: default", "name: "+clusterName)
+	r = replaceAll(r, "cluster: default", "cluster: "+clusterName)
+	r = replaceAll(r, "user: default", "user: "+clusterName)
+	r = replaceAll(r, "current-context: default", "current-context: "+clusterName)
+	return r
+}
+
+func replaceAll(s, old, new string) string {
+	result := ""
+	for {
+		idx := indexOf(s, old)
+		if idx < 0 {
+			result += s
+			break
+		}
+		result += s[:idx] + new
+		s = s[idx+len(old):]
+	}
+	return result
+}
+
+func indexOf(s, substr string) int {
+	if len(substr) == 0 {
+		return 0
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
 }

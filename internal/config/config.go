@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -12,13 +13,11 @@ type Config struct {
 	ClusterName    string `yaml:"cluster_name"`
 	KubeconfigPath string `yaml:"kubeconfig_path"`
 
-	Proxmox      ProxmoxConfig      `yaml:"proxmox"`
-	Template     TemplateConfig     `yaml:"template"`
-	NodeDefaults NodeDefaults       `yaml:"node_defaults"`
-	Networking   Networking         `yaml:"networking"`
-	K3s          K3sConfig          `yaml:"k3s"`
-	ControlPlane ControlPlaneConfig `yaml:"control_plane"`
-	WorkerPools  []WorkerPool       `yaml:"worker_pools"`
+	Proxmox      ProxmoxConfig  `yaml:"proxmox"`
+	Template     TemplateConfig `yaml:"template"`
+	K3s          K3sConfig      `yaml:"k3s"`
+	ControlPlane []CPNode       `yaml:"control_plane"`
+	Workers      []WorkerNode   `yaml:"workers"`
 }
 
 type ProxmoxConfig struct {
@@ -29,29 +28,19 @@ type ProxmoxConfig struct {
 }
 
 type TemplateConfig struct {
-	Name             string `yaml:"name"`
-	ProxmoxNode      string `yaml:"proxmox_node"`
-	Storage          string `yaml:"storage"`
-	ImageStorage     string `yaml:"image_storage"`
-	CloudInitStorage string `yaml:"cloud_init_storage"`
-	OS               string `yaml:"os"`
-	CloudImageURL    string `yaml:"cloud_image_url"`
-	VMIDBase         int    `yaml:"vmid_base"`
-}
-
-type NodeDefaults struct {
-	ProxmoxNode string `yaml:"proxmox_node"`
-	Storage     string `yaml:"storage"`
-	Cores       int    `yaml:"cores"`
-	Memory      int    `yaml:"memory"`
-	DiskSize    int    `yaml:"disk_size"`
-	Bridge      string `yaml:"bridge"`
-}
-
-type Networking struct {
-	Gateway    string `yaml:"gateway"`
-	DNS        string `yaml:"dns"`
-	SubnetMask int    `yaml:"subnet_mask"` // CIDR prefix length, default 24
+	Name           string `yaml:"name"`
+	ProxmoxNode    string `yaml:"proxmox_node"`
+	Storage        string `yaml:"storage"`
+	ImageStorage   string `yaml:"image_storage"`
+	Bridge         string `yaml:"bridge"`
+	IP             string `yaml:"ip"`
+	Gateway        string `yaml:"gateway"`
+	DNS            string `yaml:"dns"`
+	SubnetMask     int    `yaml:"subnet_mask"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	OS             string `yaml:"os"`
+	CloudImageURL  string `yaml:"cloud_image_url"`
+	VMIDBase       int    `yaml:"vmid_base"`
 }
 
 type K3sConfig struct {
@@ -60,29 +49,34 @@ type K3sConfig struct {
 	ExtraAgentArgs  string `yaml:"extra_agent_args"`
 }
 
-type ControlPlaneConfig struct {
-	Count        int      `yaml:"count"`
-	ProxmoxNode  string   `yaml:"proxmox_node"`
-	ProxmoxNodes []string `yaml:"proxmox_nodes"`
-	Storage      string   `yaml:"storage"`
-	Cores        int      `yaml:"cores"`
-	Memory       int      `yaml:"memory"`
-	DiskSize     int      `yaml:"disk_size"`
-	IPStart      string   `yaml:"ip_start"`
+type CPNode struct {
+	Name        string `yaml:"name"`
+	ProxmoxNode string `yaml:"proxmox_node"`
+	Storage     string `yaml:"storage"`
+	Bridge      string `yaml:"bridge"`
+	Cores       int    `yaml:"cores"`
+	Memory      int    `yaml:"memory"`
+	DiskSize    int    `yaml:"disk_size"`
+	IP          string `yaml:"ip"`
+	Gateway     string `yaml:"gateway"`
+	DNS         string `yaml:"dns"`
+	SubnetMask  int    `yaml:"subnet_mask"`
 }
 
-type WorkerPool struct {
-	Name         string   `yaml:"name"`
-	Count        int      `yaml:"count"`
-	ProxmoxNode  string   `yaml:"proxmox_node"`
-	ProxmoxNodes []string `yaml:"proxmox_nodes"`
-	Storage      string   `yaml:"storage"`
-	Cores        int      `yaml:"cores"`
-	Memory       int      `yaml:"memory"`
-	DiskSize     int      `yaml:"disk_size"`
-	IPStart      string   `yaml:"ip_start"`
-	Labels       []string `yaml:"labels"`
-	Taints       []string `yaml:"taints"`
+type WorkerNode struct {
+	Name        string   `yaml:"name"`
+	ProxmoxNode string   `yaml:"proxmox_node"`
+	Storage     string   `yaml:"storage"`
+	Bridge      string   `yaml:"bridge"`
+	Cores       int      `yaml:"cores"`
+	Memory      int      `yaml:"memory"`
+	DiskSize    int      `yaml:"disk_size"`
+	IP          string   `yaml:"ip"`
+	Gateway     string   `yaml:"gateway"`
+	DNS         string   `yaml:"dns"`
+	SubnetMask  int      `yaml:"subnet_mask"`
+	Labels      []string `yaml:"labels"`
+	Taints      []string `yaml:"taints"`
 }
 
 var KnownOSImages = map[string]string{
@@ -119,20 +113,33 @@ func (c *Config) applyDefaults() {
 		c.KubeconfigPath = "./kubeconfig"
 	}
 
-	if c.Template.ProxmoxNode == "" {
-		c.Template.ProxmoxNode = c.NodeDefaults.ProxmoxNode
+	// Template falls back to first CP node where possible
+	firstCP := CPNode{}
+	if len(c.ControlPlane) > 0 {
+		firstCP = c.ControlPlane[0]
 	}
 	if c.Template.Name == "" {
 		c.Template.Name = c.ClusterName + "-tmpl"
 	}
+	if c.Template.ProxmoxNode == "" {
+		c.Template.ProxmoxNode = firstCP.ProxmoxNode
+	}
 	if c.Template.Storage == "" {
-		c.Template.Storage = c.NodeDefaults.Storage
+		c.Template.Storage = coalesce(firstCP.Storage, "local-lvm")
 	}
 	if c.Template.ImageStorage == "" {
 		c.Template.ImageStorage = c.Template.Storage
 	}
-	if c.Template.CloudInitStorage == "" {
-		c.Template.CloudInitStorage = c.Template.Storage
+	if c.Template.Bridge == "" {
+		c.Template.Bridge = coalesce(firstCP.Bridge, "vmbr0")
+	}
+	if c.Template.Gateway != "" {
+		if c.Template.SubnetMask == 0 {
+			c.Template.SubnetMask = 24
+		}
+		if c.Template.DNS == "" {
+			c.Template.DNS = "1.1.1.1"
+		}
 	}
 	if c.Template.OS == "" {
 		c.Template.OS = "ubuntu-24.04"
@@ -140,65 +147,51 @@ func (c *Config) applyDefaults() {
 	if c.Template.VMIDBase == 0 {
 		c.Template.VMIDBase = 8000
 	}
+	if c.Template.TimeoutSeconds == 0 {
+		c.Template.TimeoutSeconds = 1800
+	}
 	if c.Template.CloudImageURL == "" {
 		if u, ok := KnownOSImages[c.Template.OS]; ok {
 			c.Template.CloudImageURL = u
 		}
 	}
 
-	if c.NodeDefaults.Cores == 0 {
-		c.NodeDefaults.Cores = 2
+	for i := range c.ControlPlane {
+		applyNodeDefaults(&c.ControlPlane[i].Storage, &c.ControlPlane[i].Bridge,
+			&c.ControlPlane[i].Cores, &c.ControlPlane[i].Memory,
+			&c.ControlPlane[i].DiskSize, &c.ControlPlane[i].SubnetMask,
+			&c.ControlPlane[i].DNS, c.ControlPlane[i].Gateway)
 	}
-	if c.NodeDefaults.Memory == 0 {
-		c.NodeDefaults.Memory = 2048
+	for i := range c.Workers {
+		applyNodeDefaults(&c.Workers[i].Storage, &c.Workers[i].Bridge,
+			&c.Workers[i].Cores, &c.Workers[i].Memory,
+			&c.Workers[i].DiskSize, &c.Workers[i].SubnetMask,
+			&c.Workers[i].DNS, c.Workers[i].Gateway)
 	}
-	if c.NodeDefaults.DiskSize == 0 {
-		c.NodeDefaults.DiskSize = 20
-	}
-	if c.NodeDefaults.Bridge == "" {
-		c.NodeDefaults.Bridge = "vmbr0"
-	}
-	if c.NodeDefaults.Storage == "" {
-		c.NodeDefaults.Storage = "local-lvm"
-	}
+}
 
-	if c.Networking.SubnetMask == 0 {
-		c.Networking.SubnetMask = 24
+func applyNodeDefaults(storage, bridge *string, cores, memory, diskSize, subnetMask *int, dns *string, gateway string) {
+	if *storage == "" {
+		*storage = "local-lvm"
 	}
-	if c.Networking.DNS == "" && c.Networking.Gateway != "" {
-		c.Networking.DNS = "1.1.1.1"
+	if *bridge == "" {
+		*bridge = "vmbr0"
 	}
-
-	if c.ControlPlane.Count == 0 {
-		c.ControlPlane.Count = 1
+	if *cores == 0 {
+		*cores = 2
 	}
-	c.ControlPlane.ProxmoxNode = coalesce(c.ControlPlane.ProxmoxNode, c.NodeDefaults.ProxmoxNode)
-	c.ControlPlane.Storage = coalesce(c.ControlPlane.Storage, c.NodeDefaults.Storage)
-	if c.ControlPlane.Cores == 0 {
-		c.ControlPlane.Cores = c.NodeDefaults.Cores
+	if *memory == 0 {
+		*memory = 2048
 	}
-	if c.ControlPlane.Memory == 0 {
-		c.ControlPlane.Memory = c.NodeDefaults.Memory
+	if *diskSize == 0 {
+		*diskSize = 20
 	}
-	if c.ControlPlane.DiskSize == 0 {
-		c.ControlPlane.DiskSize = c.NodeDefaults.DiskSize
-	}
-
-	for i := range c.WorkerPools {
-		p := &c.WorkerPools[i]
-		p.ProxmoxNode = coalesce(p.ProxmoxNode, c.NodeDefaults.ProxmoxNode)
-		p.Storage = coalesce(p.Storage, c.NodeDefaults.Storage)
-		if p.Cores == 0 {
-			p.Cores = c.NodeDefaults.Cores
+	if gateway != "" {
+		if *subnetMask == 0 {
+			*subnetMask = 24
 		}
-		if p.Memory == 0 {
-			p.Memory = c.NodeDefaults.Memory
-		}
-		if p.DiskSize == 0 {
-			p.DiskSize = c.NodeDefaults.DiskSize
-		}
-		if p.Count == 0 {
-			p.Count = 1
+		if *dns == "" {
+			*dns = "1.1.1.1"
 		}
 	}
 }
@@ -213,14 +206,22 @@ func (c *Config) validate() error {
 	if c.Proxmox.TokenSecret == "" {
 		return fmt.Errorf("proxmox.token_secret is required")
 	}
-	if c.NodeDefaults.ProxmoxNode == "" && c.ControlPlane.ProxmoxNode == "" {
-		return fmt.Errorf("node_defaults.proxmox_node or control_plane.proxmox_node is required")
+	if len(c.ControlPlane) != 1 && len(c.ControlPlane) != 3 {
+		return fmt.Errorf("control_plane must have 1 (standalone) or 3 (HA) nodes, got %d", len(c.ControlPlane))
 	}
-	if c.ControlPlane.Count != 1 && c.ControlPlane.Count != 3 {
-		return fmt.Errorf("control_plane.count must be 1 (standalone) or 3 (HA)")
+	for i, node := range c.ControlPlane {
+		if node.ProxmoxNode == "" {
+			return fmt.Errorf("control_plane[%d].proxmox_node is required", i)
+		}
 	}
 	if c.Template.CloudImageURL == "" {
 		return fmt.Errorf("unknown os %q; set template.cloud_image_url explicitly", c.Template.OS)
+	}
+	if (c.Template.IP == "") != (c.Template.Gateway == "") {
+		return fmt.Errorf("template.ip and template.gateway must be set together")
+	}
+	if c.Template.TimeoutSeconds <= 0 {
+		return fmt.Errorf("template.timeout_seconds must be greater than 0")
 	}
 	return nil
 }
@@ -244,4 +245,15 @@ func coalesce(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func PrefixedNodeName(clusterName, nodeName string) string {
+	if clusterName == "" || nodeName == "" {
+		return nodeName
+	}
+	prefix := clusterName + "-"
+	if strings.HasPrefix(nodeName, prefix) {
+		return nodeName
+	}
+	return prefix + nodeName
 }

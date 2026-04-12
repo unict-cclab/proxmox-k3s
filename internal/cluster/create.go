@@ -46,7 +46,7 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 	}
 
 	ui.Section(out, "VM template")
-	if err := pxclient.EnsureTemplate(ctx, px, cfg, out); err != nil {
+	if err := pxclient.EnsureTemplate(ctx, px, cfg, keyPair.PrivateKeyPath, keyPair.PublicKey, out); err != nil {
 		return err
 	}
 
@@ -99,31 +99,25 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 }
 
 func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, out io.Writer) ([]*pxclient.VMInfo, error) {
-	cp := cfg.ControlPlane
-	specs := make([]pxclient.VMSpec, 0, cp.Count)
-
-	for idx := 0; idx < cp.Count; idx++ {
-		name := fmt.Sprintf("%s-cp-%02d", cfg.ClusterName, idx+1)
-		spec := pxclient.VMSpec{
-			Name:        name,
-			ProxmoxNode: resolveNode(cp.ProxmoxNodes, cp.ProxmoxNode, idx),
-			Cores:       cp.Cores,
-			Memory:      cp.Memory,
-			DiskSize:    cp.DiskSize,
-			Storage:     cp.Storage,
-			Bridge:      cfg.NodeDefaults.Bridge,
+	specs := make([]pxclient.VMSpec, 0, len(cfg.ControlPlane))
+	for _, node := range cfg.ControlPlane {
+		specs = append(specs, pxclient.VMSpec{
+			Name:        config.PrefixedNodeName(cfg.ClusterName, node.Name),
+			ProxmoxNode: node.ProxmoxNode,
+			Cores:       node.Cores,
+			Memory:      node.Memory,
+			DiskSize:    node.DiskSize,
+			Storage:     node.Storage,
+			Bridge:      node.Bridge,
+			IPAddress:   node.IP,
+			Gateway:     node.Gateway,
+			DNS:         node.DNS,
+			SubnetMask:  node.SubnetMask,
 			User:        "ubuntu",
 			SSHPubKey:   pubKey,
 			ClusterName: cfg.ClusterName,
 			Role:        "server",
-		}
-		if cfg.Networking.Gateway != "" && cp.IPStart != "" {
-			spec.IPAddress = incrementIP(cp.IPStart, idx)
-			spec.Gateway = cfg.Networking.Gateway
-			spec.DNS = cfg.Networking.DNS
-			spec.SubnetMask = cfg.Networking.SubnetMask
-		}
-		specs = append(specs, spec)
+		})
 	}
 
 	nextVMIDStart, err := px.NextVMID(ctx, cfg.Template.VMIDBase+1)
@@ -138,51 +132,40 @@ func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config
 	return vms, nil
 }
 
-func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, out io.Writer) (map[string][]*pxclient.VMInfo, error) {
-	result := make(map[string][]*pxclient.VMInfo)
+func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, out io.Writer) ([]*pxclient.VMInfo, error) {
+	specs := make([]pxclient.VMSpec, 0, len(cfg.Workers))
+	for _, node := range cfg.Workers {
+		specs = append(specs, pxclient.VMSpec{
+			Name:        config.PrefixedNodeName(cfg.ClusterName, node.Name),
+			ProxmoxNode: node.ProxmoxNode,
+			Cores:       node.Cores,
+			Memory:      node.Memory,
+			DiskSize:    node.DiskSize,
+			Storage:     node.Storage,
+			Bridge:      node.Bridge,
+			IPAddress:   node.IP,
+			Gateway:     node.Gateway,
+			DNS:         node.DNS,
+			SubnetMask:  node.SubnetMask,
+			User:        "ubuntu",
+			SSHPubKey:   pubKey,
+			ClusterName: cfg.ClusterName,
+			Role:        "agent",
+			Labels:      node.Labels,
+			Taints:      node.Taints,
+		})
+	}
+
 	nextVMIDStart, err := px.NextVMID(ctx, cfg.Template.VMIDBase+1)
 	if err != nil {
 		return nil, fmt.Errorf("allocating starting VMID for workers: %w", err)
 	}
-
-	for _, pool := range cfg.WorkerPools {
-		ui.Step(out, "pool %q (%d nodes)", pool.Name, pool.Count)
-		specs := make([]pxclient.VMSpec, 0, pool.Count)
-
-		for idx := 0; idx < pool.Count; idx++ {
-			name := fmt.Sprintf("%s-%s-%02d", cfg.ClusterName, pool.Name, idx+1)
-			spec := pxclient.VMSpec{
-				Name:        name,
-				ProxmoxNode: resolveNode(pool.ProxmoxNodes, pool.ProxmoxNode, idx),
-				Cores:       pool.Cores,
-				Memory:      pool.Memory,
-				DiskSize:    pool.DiskSize,
-				Storage:     pool.Storage,
-				Bridge:      cfg.NodeDefaults.Bridge,
-				User:        "ubuntu",
-				SSHPubKey:   pubKey,
-				ClusterName: cfg.ClusterName,
-				Role:        "agent",
-				Labels:      pool.Labels,
-				Taints:      pool.Taints,
-			}
-			if cfg.Networking.Gateway != "" && pool.IPStart != "" {
-				spec.IPAddress = incrementIP(pool.IPStart, idx)
-				spec.Gateway = cfg.Networking.Gateway
-				spec.DNS = cfg.Networking.DNS
-				spec.SubnetMask = cfg.Networking.SubnetMask
-			}
-			specs = append(specs, spec)
-		}
-
-		nextVMIDStart = assignVMIDs(nextVMIDStart, specs)
-		poolVMs, err := createVMsParallel(ctx, px, cfg, specs, out)
-		if err != nil {
-			return nil, fmt.Errorf("creating worker pool %s: %w", pool.Name, err)
-		}
-		result[pool.Name] = poolVMs
+	assignVMIDs(nextVMIDStart, specs)
+	vms, err := createVMsParallel(ctx, px, cfg, specs, out)
+	if err != nil {
+		return nil, fmt.Errorf("creating worker VMs: %w", err)
 	}
-	return result, nil
+	return vms, nil
 }
 
 func assignVMIDs(start int, specs []pxclient.VMSpec) int {
@@ -246,7 +229,7 @@ func flushPrefixedLogs(mu *sync.Mutex, out io.Writer, name, logs string) {
 }
 
 func installControlPlane(installer *k3s.Installer, cfg *config.Config, cpVMs []*pxclient.VMInfo) (string, *k3s.NodeInfo, error) {
-	ha := cfg.ControlPlane.Count == 3
+	ha := len(cfg.ControlPlane) == 3
 
 	first, err := installer.ConnectNode(cpVMs[0].IP, cpVMs[0].Name)
 	if err != nil {
@@ -277,33 +260,31 @@ func installControlPlane(installer *k3s.Installer, cfg *config.Config, cpVMs []*
 	return token, first, nil
 }
 
-func installWorkers(installer *k3s.Installer, serverURL, token string, pools map[string][]*pxclient.VMInfo) error {
+func installWorkers(installer *k3s.Installer, serverURL, token string, workerVMs []*pxclient.VMInfo) error {
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
 		errs []error
 	)
 
-	for poolName, vms := range pools {
-		for _, vm := range vms {
-			wg.Add(1)
-			go func(name, ip, pool string) {
-				defer wg.Done()
-				node, err := installer.ConnectNode(ip, name)
-				if err != nil {
-					mu.Lock()
-					errs = append(errs, fmt.Errorf("[%s] %w", pool, err))
-					mu.Unlock()
-					return
-				}
-				defer node.Runner.Close()
-				if err := installer.InstallAgent(node, serverURL, token); err != nil {
-					mu.Lock()
-					errs = append(errs, fmt.Errorf("[%s] %w", pool, err))
-					mu.Unlock()
-				}
-			}(vm.Name, vm.IP, poolName)
-		}
+	for _, vm := range workerVMs {
+		wg.Add(1)
+		go func(name, ip string) {
+			defer wg.Done()
+			node, err := installer.ConnectNode(ip, name)
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+				return
+			}
+			defer node.Runner.Close()
+			if err := installer.InstallAgent(node, serverURL, token); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}(vm.Name, vm.IP)
 	}
 	wg.Wait()
 
@@ -313,54 +294,14 @@ func installWorkers(installer *k3s.Installer, serverURL, token string, pools map
 	return nil
 }
 
-func applyLabelsAndTaints(installer *k3s.Installer, cpNode *k3s.NodeInfo, cfg *config.Config, pools map[string][]*pxclient.VMInfo) error {
-	for _, pool := range cfg.WorkerPools {
-		if len(pool.Labels) == 0 && len(pool.Taints) == 0 {
+func applyLabelsAndTaints(installer *k3s.Installer, cpNode *k3s.NodeInfo, cfg *config.Config, workerVMs []*pxclient.VMInfo) error {
+	for i, worker := range cfg.Workers {
+		if len(worker.Labels) == 0 && len(worker.Taints) == 0 {
 			continue
 		}
-		for j := range pools[pool.Name] {
-			nodeName := fmt.Sprintf("%s-%s-%02d", cfg.ClusterName, pool.Name, j+1)
-			if err := installer.ApplyNodeLabels(cpNode, nodeName, pool.Labels, pool.Taints); err != nil {
-				return err
-			}
+		if err := installer.ApplyNodeLabels(cpNode, workerVMs[i].Name, worker.Labels, worker.Taints); err != nil {
+			return err
 		}
 	}
 	return nil
-}
-
-func resolveNode(perVM []string, fallback string, idx int) string {
-	if idx < len(perVM) && perVM[idx] != "" {
-		return perVM[idx]
-	}
-	return fallback
-}
-
-func incrementIP(base string, n int) string {
-	parts := splitDots(base)
-	if len(parts) != 4 {
-		return base
-	}
-	return fmt.Sprintf("%s.%s.%s.%d", parts[0], parts[1], parts[2], atoi(parts[3])+n)
-}
-
-func splitDots(s string) []string {
-	var parts []string
-	start := 0
-	for i := 0; i <= len(s); i++ {
-		if i == len(s) || s[i] == '.' {
-			parts = append(parts, s[start:i])
-			start = i + 1
-		}
-	}
-	return parts
-}
-
-func atoi(s string) int {
-	n := 0
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		}
-	}
-	return n
 }

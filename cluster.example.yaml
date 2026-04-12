@@ -1,6 +1,5 @@
 # proxmox-k3s cluster configuration
-# Only proxmox.api_url, token_id, and token_secret are required.
-# Everything else has sensible defaults.
+# Only proxmox credentials and control_plane nodes are required.
 
 cluster_name: my-cluster          # default: "k3s-cluster"
 kubeconfig_path: ./kubeconfig     # where to write the kubeconfig after creation
@@ -14,21 +13,18 @@ proxmox:
 # VM template built once and reused for all cluster VMs.
 template:
   # name: ubuntu-24.04-k3s-base  # optional: share one template across multiple clusters
-  proxmox_node: pve1              # which PVE node builds the template
-  storage: local-lvm              # storage pool for the template disk
+  proxmox_node: pve1              # defaults to first control_plane node's proxmox_node
+  storage: local-lvm              # storage for the template disk and cloud-init disk; must support "images"
   # image_storage: local          # optional staging storage for downloaded cloud images; needed for Ceph/RBD
-  cloud_init_storage: local-lvm   # storage for the cloud-init disk; must support "images"
   os: ubuntu-24.04                # resolves to the official Ubuntu cloud image
+  bridge: vmbr0                   # template creation boots once for package upgrades on this network
+  # Static IP for the temporary template boot. Leave commented to use DHCP instead.
+  # ip: 192.168.1.90
+  # gateway: 192.168.1.1
+  # dns: 1.1.1.1
+  # subnet_mask: 24
+  # timeout_seconds: 1800        # optional: one timeout used for the whole template lifecycle
   # cloud_image_url: https://...  # override: bring your own cloud image
-
-# Defaults applied to all nodes unless overridden per pool.
-node_defaults:
-  proxmox_node: pve1
-  storage: local-lvm              # VM disk storage — works with lvm-thin, zfs, ceph, dir
-  cores: 2
-  memory: 2048                    # MB
-  disk_size: 20                   # GB
-  bridge: vmbr0
 
 # k3s installation options.
 k3s:
@@ -36,53 +32,73 @@ k3s:
   extra_server_args: "--disable=traefik --disable=servicelb"
   # extra_agent_args: ""
 
-# Static networking (optional — leave this section out to use DHCP).
-# When using DHCP, VM IPs are discovered via the QEMU guest agent after boot.
-# networking:
-#   gateway: 192.168.1.1
-#   dns: 1.1.1.1
-#   subnet_mask: 24               # CIDR prefix length
-
 # Control plane nodes: 1 (standalone) or 3 (HA with embedded etcd).
+# Omit ip/gateway/dns/subnet_mask to use DHCP.
 control_plane:
-  count: 1
-  # proxmox_node: pve1            # override node_defaults.proxmox_node
-  # proxmox_nodes:                # per-VM node placement (index matches VM number)
-  #   - pve1                      # cp-01 → pve1
-  #   - pve2                      # cp-02 → pve2
-  #   - pve3                      # cp-03 → pve3
-  # storage: local-lvm
-  cores: 2
-  memory: 4096
-  disk_size: 20
-  # ip_start: 192.168.1.100       # first CP gets .100, second .101, etc.
+  - name: cp-01
+    proxmox_node: pve1
+    storage: local-lvm
+    bridge: vmbr0
+    cores: 2
+    memory: 4096
+    disk_size: 20
+    ip: 192.168.1.100
+    gateway: 192.168.1.1
+    dns: 1.1.1.1
+    subnet_mask: 24
 
-# Worker node pools (can define multiple with different specs/storage).
-worker_pools:
-  - name: workers
-    count: 2
-    # proxmox_node: pve1          # default for all VMs in this pool
-    # proxmox_nodes:              # per-VM override (falls back to proxmox_node)
-    #   - pve1
-    #   - pve2
-    # storage: local-lvm
+  # Uncomment for HA (3 nodes total):
+  # - name: cp-02
+  #   proxmox_node: pve2
+  #   storage: local-lvm
+  #   bridge: vmbr0
+  #   cores: 2
+  #   memory: 4096
+  #   disk_size: 20
+  #   ip: 192.168.1.101
+  #   gateway: 192.168.1.1
+  #   dns: 1.1.1.1
+  #   subnet_mask: 24
+
+  # - name: cp-03
+  #   proxmox_node: pve3
+  #   storage: local-lvm
+  #   bridge: vmbr0
+  #   cores: 2
+  #   memory: 4096
+  #   disk_size: 20
+  #   ip: 192.168.1.102
+  #   gateway: 192.168.1.1
+  #   dns: 1.1.1.1
+  #   subnet_mask: 24
+
+workers:
+  - name: worker-01
+    proxmox_node: pve1
+    storage: local-lvm
+    bridge: vmbr0
     cores: 4
     memory: 4096
     disk_size: 40
-    # ip_start: 192.168.1.110
+    ip: 192.168.1.110
+    gateway: 192.168.1.1
+    dns: 1.1.1.1
+    subnet_mask: 24
     labels:
       - "nodepool=workers"
     taints: []
 
-  # Example: a second pool on different storage (e.g. Ceph)
-  # - name: storage-nodes
-  #   count: 2
-  #   proxmox_node: pve2
-  #   storage: ceph-pool          # any storage pool name known to Proxmox
-  #   cores: 8
-  #   memory: 16384
-  #   disk_size: 200
-  #   labels:
-  #     - "nodepool=storage"
-  #   taints:
-  #     - "nodepool=storage:NoSchedule"
+  - name: worker-02
+    proxmox_node: pve2
+    storage: local-lvm
+    bridge: vmbr0
+    cores: 4
+    memory: 4096
+    disk_size: 40
+    ip: 192.168.1.111
+    gateway: 192.168.1.1
+    dns: 1.1.1.1
+    subnet_mask: 24
+    labels:
+      - "nodepool=workers"
+    taints: []
