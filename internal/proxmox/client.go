@@ -163,10 +163,6 @@ func (c *Client) FindClusterVMs(ctx context.Context, clusterName string) ([]*pxa
 	return result, nil
 }
 
-func clusterTag(clusterName string) string {
-	return clusterName
-}
-
 func hasTag(tags, target string) bool {
 	for _, t := range splitTags(tags) {
 		if t == target {

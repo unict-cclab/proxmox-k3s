@@ -11,9 +11,20 @@ linters:
     - nilerr
     - bodyclose
 
-linters-settings:
-  misspell:
-    locale: US
+  settings:
+    misspell:
+      locale: US
+
+  exclusions:
+    rules:
+      # Ignoring the error from Close() is the standard Go idiom for deferred
+      # cleanup and explicit teardown calls.
+      - linters: [errcheck]
+        text: "Error return value of `.*\\.Close` is not checked"
+      # fmt.Fprint*/fmt.Scanln write to output writers; errors from these are
+      # never actionable in a CLI tool.
+      - linters: [errcheck]
+        text: "Error return value of `fmt\\."
 
 issues:
   max-same-issues: 0

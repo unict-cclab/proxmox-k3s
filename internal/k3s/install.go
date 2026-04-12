@@ -120,7 +120,7 @@ func (i *Installer) ApplyNodeLabels(cpNode *NodeInfo, nodeName string, labels, t
 	if len(labels) > 0 {
 		cmd := fmt.Sprintf("sudo kubectl label node %s %s --overwrite", nodeName, strings.Join(labels, " "))
 		if _, err := cpNode.Runner.Output(cmd); err != nil {
-			return fmt.Errorf("labelling %s: %w", nodeName, err)
+			return fmt.Errorf("labeling %s: %w", nodeName, err)
 		}
 	}
 
