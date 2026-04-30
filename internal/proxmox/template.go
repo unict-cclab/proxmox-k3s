@@ -83,11 +83,16 @@ func EnsureTemplate(ctx context.Context, c *Client, cfg *config.Config, sshKeyPa
 	}
 
 	ui.Step(out, "[template] configuring first-boot cloud-init...")
-	configTask, err := c.ConfigVM(ctx, cfg.Template.ProxmoxNode, vmid, encodeConfigBody(map[string]string{
-		"ciuser":    templateSSHUser,
-		"sshkeys":   encodeSSHKey(sshPubKey),
-		"ipconfig0": buildTemplateIPConfig(cfg.Template),
-	}))
+	ciConfig := map[string]string{
+		"ciuser":     templateSSHUser,
+		"sshkeys":    encodeSSHKey(sshPubKey),
+		"ipconfig0":  buildTemplateIPConfig(cfg.Template),
+		"nameserver": cfg.Template.DNS,
+	}
+	if cfg.Template.Password != "" {
+		ciConfig["cipassword"] = cfg.Template.Password
+	}
+	configTask, err := c.ConfigVM(ctx, cfg.Template.ProxmoxNode, vmid, encodeConfigBody(ciConfig))
 	if err != nil {
 		return fmt.Errorf("configuring template VM: %w", err)
 	}
@@ -98,6 +103,13 @@ func EnsureTemplate(ctx context.Context, c *Client, cfg *config.Config, sshKeyPa
 	vm, err := node.VirtualMachine(ctx, vmid)
 	if err != nil {
 		return fmt.Errorf("fetching template VM %d: %w", vmid, err)
+	}
+
+	if cfg.Template.DiskSize > 0 {
+		ui.Step(out, "[template] resizing disk to %dG...", cfg.Template.DiskSize)
+		if err := vm.ResizeDisk(ctx, "scsi0", fmt.Sprintf("%dG", cfg.Template.DiskSize)); err != nil {
+			return fmt.Errorf("resizing template VM disk: %w", err)
+		}
 	}
 
 	if err := prepareTemplateGuest(ctx, vm, cfg.Template, sshKeyPath, out); err != nil {

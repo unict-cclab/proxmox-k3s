@@ -98,13 +98,14 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		tag := "proxmox-k3s;" + spec.ClusterName + ";role-" + spec.Role
 
 		body := encodeConfigBody(map[string]string{
-			"cores":     fmt.Sprintf("%d", spec.Cores),
-			"memory":    fmt.Sprintf("%d", spec.Memory),
-			"net0":      fmt.Sprintf("virtio,bridge=%s", spec.Bridge),
-			"ciuser":    spec.User,
-			"sshkeys":   encodeSSHKey(spec.SSHPubKey),
-			"ipconfig0": buildIPConfig(spec),
-			"tags":      tag,
+			"cores":      fmt.Sprintf("%d", spec.Cores),
+			"memory":     fmt.Sprintf("%d", spec.Memory),
+			"net0":       fmt.Sprintf("virtio,bridge=%s", spec.Bridge),
+			"ciuser":     spec.User,
+			"sshkeys":    encodeSSHKey(spec.SSHPubKey),
+			"ipconfig0":  buildIPConfig(spec),
+			"nameserver": spec.DNS,
+			"tags":       tag,
 		})
 
 		configTask, err := c.ConfigVM(ctx, spec.ProxmoxNode, vmid, body)

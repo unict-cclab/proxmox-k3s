@@ -37,6 +37,8 @@ type TemplateConfig struct {
 	Gateway        string `yaml:"gateway"`
 	DNS            string `yaml:"dns"`
 	SubnetMask     int    `yaml:"subnet_mask"`
+	DiskSize       int    `yaml:"disk_size"`
+	Password       string `yaml:"password"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
 	OS             string `yaml:"os"`
 	CloudImageURL  string `yaml:"cloud_image_url"`
@@ -143,6 +145,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Template.OS == "" {
 		c.Template.OS = "ubuntu-24.04"
+	}
+	if c.Template.DiskSize == 0 {
+		c.Template.DiskSize = 10
 	}
 	if c.Template.VMIDBase == 0 {
 		c.Template.VMIDBase = 8000
