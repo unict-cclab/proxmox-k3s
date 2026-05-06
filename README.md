@@ -31,7 +31,7 @@ Provision and manage k3s clusters on Proxmox VE with a single CLI and a single Y
 
 Download the latest CLI binary from the GitHub Releases page:
 
-https://github.com/amarchese96/proxmox-k3s/releases
+https://github.com/unict-cclab/proxmox-k3s/releases
 
 Choose the archive for your platform, extract it, and place `proxmox-k3s` somewhere in your `PATH`.
 
