@@ -1,4 +1,4 @@
-package proxmox
+﻿package proxmox
 
 import (
 	"context"
@@ -11,8 +11,17 @@ import (
 
 	pxapi "github.com/luthermonson/go-proxmox"
 
-	"github.com/amarchese96/proxmox-k3s/internal/config"
-	"github.com/amarchese96/proxmox-k3s/internal/ui"
+	"github.com/unict-cclab/proxmox-k3s/internal/config"
+	"github.com/unict-cclab/proxmox-k3s/internal/ui"
+)
+
+const (
+	cloudInitRetries  = 3
+	cloneTaskTimeout  = 600 // seconds
+	configTaskTimeout = 30  // seconds
+	startTaskTimeout  = 120 // seconds
+	stopTaskTimeout   = 60  // seconds
+	deleteTaskTimeout = 60  // seconds
 )
 
 type VMSpec struct {
@@ -68,7 +77,7 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 	}
 
 	nextVMIDStart := spec.VMID
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < cloudInitRetries; attempt++ {
 		vmid := nextVMIDStart
 
 		ui.Step(out, "cloning %s (VMID %d) from template...", spec.Name, vmid)
@@ -81,7 +90,7 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		if err != nil {
 			return nil, fmt.Errorf("cloning template for %s: %w", spec.Name, err)
 		}
-		if err := waitForTaskOK(ctx, cloneTask, 600); err != nil {
+		if err := waitForTaskOK(ctx, cloneTask, cloneTaskTimeout); err != nil {
 			return nil, fmt.Errorf("waiting for clone of %s: %w", spec.Name, err)
 		}
 
@@ -113,10 +122,12 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		if err != nil {
 			return nil, fmt.Errorf("configuring %s: %w", spec.Name, err)
 		}
-		if err := waitForTaskOK(ctx, configTask, 30); err != nil {
-			if isCloudInitVolumeConflict(err) && attempt < 2 {
+		if err := waitForTaskOK(ctx, configTask, configTaskTimeout); err != nil {
+			if isCloudInitVolumeConflict(err) && attempt < cloudInitRetries-1 {
 				ui.Warn(out, "cloud-init volume for VMID %d already exists, retrying with a new VMID...", vmid)
-				_ = cleanupFailedVM(ctx, vm, out)
+				if cleanupErr := cleanupFailedVM(ctx, vm, out); cleanupErr != nil {
+					ui.Warn(out, "cleanup of failed VM %d: %v", vmid, cleanupErr)
+				}
 				nextVMIDStart = vmid + 1
 				continue
 			}
@@ -135,7 +146,7 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		if err != nil {
 			return nil, fmt.Errorf("starting %s: %w", spec.Name, err)
 		}
-		if err := waitForTaskOK(ctx, startTask, 120); err != nil {
+		if err := waitForTaskOK(ctx, startTask, startTaskTimeout); err != nil {
 			return nil, fmt.Errorf("waiting for %s to start: %w", spec.Name, err)
 		}
 
@@ -199,7 +210,7 @@ func DeleteVM(ctx context.Context, c *Client, name string, out io.Writer) error 
 		if err != nil {
 			return fmt.Errorf("stopping %s: %w", name, err)
 		}
-		if err := waitForTaskOK(ctx, stopTask, 60); err != nil {
+		if err := waitForTaskOK(ctx, stopTask, stopTaskTimeout); err != nil {
 			return fmt.Errorf("waiting for %s to stop: %w", name, err)
 		}
 	}
@@ -209,7 +220,7 @@ func DeleteVM(ctx context.Context, c *Client, name string, out io.Writer) error 
 	if err != nil {
 		return fmt.Errorf("deleting %s: %w", name, err)
 	}
-	return waitForTaskOK(ctx, task, 60)
+	return waitForTaskOK(ctx, task, deleteTaskTimeout)
 }
 
 func buildIPConfig(spec VMSpec) string {
@@ -235,11 +246,11 @@ func encodeSSHKey(key string) string {
 }
 
 func encodeConfigBody(values map[string]string) string {
-	parts := make([]string, 0, len(values))
+	v := make(url.Values, len(values))
 	for key, value := range values {
-		parts = append(parts, url.QueryEscape(key)+"="+url.QueryEscape(value))
+		v[key] = []string{value}
 	}
-	return strings.Join(parts, "&")
+	return v.Encode()
 }
 
 func isCloudInitVolumeConflict(err error) bool {
@@ -256,5 +267,5 @@ func cleanupFailedVM(ctx context.Context, vm *pxapi.VirtualMachine, out io.Write
 	if err != nil {
 		return err
 	}
-	return waitForTaskOK(ctx, task, 60)
+	return waitForTaskOK(ctx, task, deleteTaskTimeout)
 }

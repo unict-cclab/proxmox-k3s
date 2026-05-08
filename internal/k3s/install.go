@@ -1,7 +1,8 @@
-package k3s
+﻿package k3s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/amarchese96/proxmox-k3s/internal/config"
-	"github.com/amarchese96/proxmox-k3s/internal/ui"
-	"github.com/amarchese96/proxmox-k3s/internal/util"
+	"github.com/unict-cclab/proxmox-k3s/internal/config"
+	"github.com/unict-cclab/proxmox-k3s/internal/ui"
+	"github.com/unict-cclab/proxmox-k3s/internal/util"
 )
 
 const (
@@ -70,6 +71,10 @@ func (i *Installer) InstallFirstServer(node *NodeInfo, ha bool) (token string, e
 
 	ui.Step(i.out, "waiting for k3s to be ready on %s...", node.Name)
 	if err := i.waitForK3sReady(node.Runner); err != nil {
+		return "", err
+	}
+
+	if err := setupUserKubeconfig(node.Runner); err != nil {
 		return "", err
 	}
 
@@ -168,12 +173,16 @@ func LatestK3sVersion(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	tag := extractJSONString(string(body), "tag_name")
-	if tag == "" {
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("parsing GitHub response: %w", err)
+	}
+	if release.TagName == "" {
 		return "", fmt.Errorf("could not parse tag_name from GitHub response")
 	}
-	return tag, nil
+	return release.TagName, nil
 }
 
 func (i *Installer) installCommand(role string, envVars []string) string {
@@ -205,7 +214,7 @@ func (i *Installer) serverArgs(clusterInit bool, serverURL, token string) []stri
 		args = append(args, "K3S_TOKEN="+token)
 	}
 
-	var execArgs []string
+	execArgs := []string{"--write-kubeconfig-mode=0644"}
 	if clusterInit {
 		execArgs = append(execArgs, "--cluster-init")
 	}
@@ -215,34 +224,20 @@ func (i *Installer) serverArgs(clusterInit bool, serverURL, token string) []stri
 	if i.cfg.K3s.ExtraServerArgs != "" {
 		execArgs = append(execArgs, i.cfg.K3s.ExtraServerArgs)
 	}
-	if len(execArgs) > 0 {
-		args = append(args, "INSTALL_K3S_EXEC="+strings.Join(execArgs, " "))
-	}
+	args = append(args, "INSTALL_K3S_EXEC="+strings.Join(execArgs, " "))
 	return args
 }
 
 func (i *Installer) waitForK3sReady(runner *util.Runner) error {
-	for attempt := 0; attempt < 24; attempt++ {
+	const timeout = 5 * time.Minute
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
 		if _, err := runner.Output("sudo kubectl get nodes"); err == nil {
 			return nil
 		}
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("k3s did not become ready within 2 minutes")
-}
-
-func extractJSONString(body, key string) string {
-	search := `"` + key + `":"`
-	idx := strings.Index(body, search)
-	if idx < 0 {
-		return ""
-	}
-	rest := body[idx+len(search):]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
+	return fmt.Errorf("k3s did not become ready within %s", timeout)
 }
 
 func (i *Installer) readJoinToken(node *NodeInfo) (string, error) {
@@ -295,6 +290,14 @@ func (i *Installer) waitForKubeconfig(node *NodeInfo) (string, error) {
 		return "", fmt.Errorf("kubeconfig not available after %s; last error: %w", kubeconfigTimeout, lastErr)
 	}
 	return "", fmt.Errorf("kubeconfig not available after %s", kubeconfigTimeout)
+}
+
+func setupUserKubeconfig(runner *util.Runner) error {
+	cmd := "mkdir -p $HOME/.kube && sudo cp /etc/rancher/k3s/k3s.yaml $HOME/.kube/config && sudo chown $(id -u):$(id -g) $HOME/.kube/config"
+	if _, err := runner.Output(cmd); err != nil {
+		return fmt.Errorf("setting up kubeconfig for user: %w", err)
+	}
+	return nil
 }
 
 func (i *Installer) ensureServerRole(node *NodeInfo) error {

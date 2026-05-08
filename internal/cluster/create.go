@@ -9,14 +9,165 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/amarchese96/proxmox-k3s/internal/config"
-	"github.com/amarchese96/proxmox-k3s/internal/k3s"
-	pxclient "github.com/amarchese96/proxmox-k3s/internal/proxmox"
-	"github.com/amarchese96/proxmox-k3s/internal/ui"
-	"github.com/amarchese96/proxmox-k3s/internal/util"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/unict-cclab/proxmox-k3s/internal/addons"
+	"github.com/unict-cclab/proxmox-k3s/internal/config"
+	"github.com/unict-cclab/proxmox-k3s/internal/k3s"
+	pxclient "github.com/unict-cclab/proxmox-k3s/internal/proxmox"
+	"github.com/unict-cclab/proxmox-k3s/internal/ui"
+	"github.com/unict-cclab/proxmox-k3s/internal/util"
 )
 
+// clusterState holds per-cluster data needed for post-creation steps
+// (addon installation, cluster mesh wiring).
+type clusterState struct {
+	spec       config.ClusterSpec
+	cpIP       string
+	kubeconfig []byte
+	keyPath    string
+}
+
+// Create provisions all clusters defined in the config.
 func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	return createMulti(ctx, cfg, out)
+}
+
+func createMulti(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	states := make([]*clusterState, 0, len(cfg.Clusters))
+
+	for _, spec := range cfg.Clusters {
+		clusterCfg := cfg.ToClusterConfig(spec)
+
+		fmt.Fprintln(out)
+		ui.Section(out, fmt.Sprintf("=== Cluster: %s ===", spec.ClusterName))
+
+		if err := createSingle(ctx, clusterCfg, out); err != nil {
+			return fmt.Errorf("cluster %s: %w", spec.ClusterName, err)
+		}
+
+		kubeconfig, err := os.ReadFile(clusterCfg.KubeconfigPath)
+		if err != nil {
+			return fmt.Errorf("reading kubeconfig for %s: %w", spec.ClusterName, err)
+		}
+
+		stateDir, err := config.StateDirForCluster(spec.ClusterName)
+		if err != nil {
+			return fmt.Errorf("state dir for %s: %w", spec.ClusterName, err)
+		}
+		keyPair, err := util.EnsureKeyPair(stateDir)
+		if err != nil {
+			return fmt.Errorf("key pair for %s: %w", spec.ClusterName, err)
+		}
+
+		st := &clusterState{
+			spec:       spec,
+			cpIP:       clusterCfg.ControlPlane[0].IP,
+			kubeconfig: kubeconfig,
+			keyPath:    keyPair.PrivateKeyPath,
+		}
+		states = append(states, st)
+
+		if cfg.Addons.Cilium.Enabled || cfg.Addons.Monitoring.Enabled {
+			if err := installAddons(cfg, st, out); err != nil {
+				return err
+			}
+		}
+	}
+
+	if cfg.Addons.Cilium.Enabled && cfg.Addons.Cilium.ClusterMesh && len(states) > 1 {
+		if err := connectMesh(cfg, states, out); err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintln(out)
+	ui.Success(out, "All clusters ready — %d cluster(s)", len(states))
+	for _, st := range states {
+		ui.Info(out, "  %s  kubeconfig → %s", st.spec.ClusterName, st.spec.KubeconfigPath)
+		if cfg.Addons.Monitoring.Enabled {
+			ui.Info(out, "  %s  Prometheus :%d  Grafana :%d",
+				st.spec.ClusterName,
+				cfg.Addons.Monitoring.PrometheusNodePort,
+				cfg.Addons.Monitoring.GrafanaNodePort,
+			)
+		}
+	}
+	return nil
+}
+
+func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
+	runner, err := util.DialWithKey(st.cpIP, 22, "ubuntu", st.keyPath)
+	if err != nil {
+		return fmt.Errorf("SSH to %s CP: %w", st.spec.ClusterName, err)
+	}
+	defer runner.Close()
+
+	if err := addons.EnsureHelm(runner, out); err != nil {
+		return fmt.Errorf("[%s] Helm: %w", st.spec.ClusterName, err)
+	}
+
+	if cfg.Addons.Cilium.Enabled {
+		if err := addons.InstallCilium(runner, cfg.Addons.Cilium,
+			st.spec.ClusterName, st.spec.CiliumClusterID, out); err != nil {
+			return err
+		}
+	}
+
+	if cfg.Addons.Monitoring.Enabled {
+		if err := addons.InstallMonitoring(runner, cfg.Addons.Monitoring,
+			st.spec.ClusterName, out); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// connectMesh enables cluster mesh on every cluster, then connects them pairwise.
+func connectMesh(cfg *config.Config, states []*clusterState, out io.Writer) error {
+	fmt.Fprintln(out)
+	ui.Section(out, "=== Cilium cluster mesh ===")
+
+	for _, st := range states {
+		runner, err := util.DialWithKey(st.cpIP, 22, "ubuntu", st.keyPath)
+		if err != nil {
+			return fmt.Errorf("SSH to %s: %w", st.spec.ClusterName, err)
+		}
+		err = addons.EnableClusterMesh(runner, st.spec.ClusterName, out)
+		runner.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	// Connect each unique pair (i, j) where i < j; cilium connect is bidirectional.
+	for i, source := range states {
+		dests := make(map[string][]byte)
+		for _, dest := range states[i+1:] {
+			dests[dest.spec.ClusterName] = dest.kubeconfig
+		}
+		if len(dests) == 0 {
+			continue
+		}
+
+		runner, err := util.DialWithKey(source.cpIP, 22, "ubuntu", source.keyPath)
+		if err != nil {
+			return fmt.Errorf("SSH to %s: %w", source.spec.ClusterName, err)
+		}
+		err = addons.ConnectClusterMesh(runner, source.spec.ClusterName,
+			source.kubeconfig, dests, out)
+		runner.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	ui.Success(out, "All clusters connected via Cilium cluster mesh")
+	return nil
+}
+
+func createSingle(ctx context.Context, cfg *config.Config, out io.Writer) error {
 	stateDir, err := config.StateDirForCluster(cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("creating state dir: %w", err)
@@ -50,14 +201,20 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 		return err
 	}
 
+	// Allocate all VM IDs in one Proxmox scan: CP nodes first, workers after.
+	vmidBase, err := px.NextVMID(ctx, cfg.Template.VMIDBase+1)
+	if err != nil {
+		return fmt.Errorf("allocating VMIDs: %w", err)
+	}
+
 	ui.Section(out, "Control-plane VMs")
-	cpVMs, err := createControlPlaneVMs(ctx, px, cfg, keyPair.PublicKey, out)
+	cpVMs, err := createControlPlaneVMs(ctx, px, cfg, keyPair.PublicKey, vmidBase, out)
 	if err != nil {
 		return err
 	}
 
 	ui.Section(out, "Worker VMs")
-	workerVMs, err := createWorkerVMs(ctx, px, cfg, keyPair.PublicKey, out)
+	workerVMs, err := createWorkerVMs(ctx, px, cfg, keyPair.PublicKey, vmidBase+len(cfg.ControlPlane), out)
 	if err != nil {
 		return err
 	}
@@ -73,7 +230,7 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 
 	serverURL := "https://" + firstCP.IP + ":6443"
 
-	if err := installWorkers(installer, serverURL, token, workerVMs); err != nil {
+	if err := installWorkers(ctx, installer, serverURL, token, workerVMs); err != nil {
 		return err
 	}
 
@@ -98,10 +255,11 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 	return nil
 }
 
-func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, out io.Writer) ([]*pxclient.VMInfo, error) {
+func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmidBase int, out io.Writer) ([]*pxclient.VMInfo, error) {
 	specs := make([]pxclient.VMSpec, 0, len(cfg.ControlPlane))
-	for _, node := range cfg.ControlPlane {
+	for i, node := range cfg.ControlPlane {
 		specs = append(specs, pxclient.VMSpec{
+			VMID:        vmidBase + i,
 			Name:        config.PrefixedNodeName(cfg.ClusterName, node.Name),
 			ProxmoxNode: node.ProxmoxNode,
 			Cores:       node.Cores,
@@ -120,11 +278,6 @@ func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config
 		})
 	}
 
-	nextVMIDStart, err := px.NextVMID(ctx, cfg.Template.VMIDBase+1)
-	if err != nil {
-		return nil, fmt.Errorf("allocating starting VMID for control-plane: %w", err)
-	}
-	assignVMIDs(nextVMIDStart, specs)
 	vms, err := createVMsParallel(ctx, px, cfg, specs, out)
 	if err != nil {
 		return nil, fmt.Errorf("creating control-plane VMs: %w", err)
@@ -132,10 +285,11 @@ func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config
 	return vms, nil
 }
 
-func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, out io.Writer) ([]*pxclient.VMInfo, error) {
+func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmidBase int, out io.Writer) ([]*pxclient.VMInfo, error) {
 	specs := make([]pxclient.VMSpec, 0, len(cfg.Workers))
-	for _, node := range cfg.Workers {
+	for i, node := range cfg.Workers {
 		specs = append(specs, pxclient.VMSpec{
+			VMID:        vmidBase + i,
 			Name:        config.PrefixedNodeName(cfg.ClusterName, node.Name),
 			ProxmoxNode: node.ProxmoxNode,
 			Cores:       node.Cores,
@@ -156,11 +310,6 @@ func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Confi
 		})
 	}
 
-	nextVMIDStart, err := px.NextVMID(ctx, cfg.Template.VMIDBase+1)
-	if err != nil {
-		return nil, fmt.Errorf("allocating starting VMID for workers: %w", err)
-	}
-	assignVMIDs(nextVMIDStart, specs)
 	vms, err := createVMsParallel(ctx, px, cfg, specs, out)
 	if err != nil {
 		return nil, fmt.Errorf("creating worker VMs: %w", err)
@@ -168,52 +317,31 @@ func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Confi
 	return vms, nil
 }
 
-func assignVMIDs(start int, specs []pxclient.VMSpec) int {
-	next := start
-	for i := range specs {
-		if specs[i].VMID != 0 {
-			next = specs[i].VMID + 1
-			continue
-		}
-		specs[i].VMID = next
-		next++
-	}
-	return next
-}
-
 func createVMsParallel(ctx context.Context, px *pxclient.Client, cfg *config.Config, specs []pxclient.VMSpec, out io.Writer) ([]*pxclient.VMInfo, error) {
 	results := make([]*pxclient.VMInfo, len(specs))
-	errs := make([]error, len(specs))
+	var outMu sync.Mutex
 
-	var (
-		wg    sync.WaitGroup
-		outMu sync.Mutex
-	)
-	for i := range specs {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+	g, ctx := errgroup.WithContext(ctx)
+	for i, spec := range specs {
+		i, spec := i, spec
+		g.Go(func() error {
 			var vmLog bytes.Buffer
-			vmInfo, err := pxclient.CreateVM(ctx, px, cfg, specs[idx], &vmLog)
-			flushPrefixedLogs(&outMu, out, specs[idx].Name, vmLog.String())
+			vmInfo, err := pxclient.CreateVM(ctx, px, cfg, spec, &vmLog)
+			writePrefixedLogs(&outMu, out, spec.Name, vmLog.String())
 			if err != nil {
-				errs[idx] = fmt.Errorf("%s: %w", specs[idx].Name, err)
-				return
+				return fmt.Errorf("%s: %w", spec.Name, err)
 			}
-			results[idx] = vmInfo
-		}(i)
+			results[i] = vmInfo
+			return nil
+		})
 	}
-	wg.Wait()
-
-	for _, err := range errs {
-		if err != nil {
-			return nil, err
-		}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
 
-func flushPrefixedLogs(mu *sync.Mutex, out io.Writer, name, logs string) {
+func writePrefixedLogs(mu *sync.Mutex, out io.Writer, name, logs string) {
 	if strings.TrimSpace(logs) == "" {
 		return
 	}
@@ -260,38 +388,20 @@ func installControlPlane(installer *k3s.Installer, cfg *config.Config, cpVMs []*
 	return token, first, nil
 }
 
-func installWorkers(installer *k3s.Installer, serverURL, token string, workerVMs []*pxclient.VMInfo) error {
-	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		errs []error
-	)
-
+func installWorkers(ctx context.Context, installer *k3s.Installer, serverURL, token string, workerVMs []*pxclient.VMInfo) error {
+	g, ctx := errgroup.WithContext(ctx)
 	for _, vm := range workerVMs {
-		wg.Add(1)
-		go func(name, ip string) {
-			defer wg.Done()
-			node, err := installer.ConnectNode(ip, name)
+		vm := vm
+		g.Go(func() error {
+			node, err := installer.ConnectNode(vm.IP, vm.Name)
 			if err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-				return
+				return err
 			}
 			defer node.Runner.Close()
-			if err := installer.InstallAgent(node, serverURL, token); err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-			}
-		}(vm.Name, vm.IP)
+			return installer.InstallAgent(node, serverURL, token)
+		})
 	}
-	wg.Wait()
-
-	if len(errs) > 0 {
-		return fmt.Errorf("worker installation errors: %v", errs)
-	}
-	return nil
+	return g.Wait()
 }
 
 func applyLabelsAndTaints(installer *k3s.Installer, cpNode *k3s.NodeInfo, cfg *config.Config, workerVMs []*pxclient.VMInfo) error {

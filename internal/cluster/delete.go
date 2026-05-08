@@ -4,14 +4,42 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sync"
 
-	"github.com/amarchese96/proxmox-k3s/internal/config"
-	pxclient "github.com/amarchese96/proxmox-k3s/internal/proxmox"
-	"github.com/amarchese96/proxmox-k3s/internal/ui"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/unict-cclab/proxmox-k3s/internal/config"
+	pxclient "github.com/unict-cclab/proxmox-k3s/internal/proxmox"
+	"github.com/unict-cclab/proxmox-k3s/internal/ui"
 )
 
+// Delete removes all clusters defined in the config.
 func Delete(ctx context.Context, cfg *config.Config, deleteTemplate bool, out io.Writer) error {
+	return deleteMulti(ctx, cfg, deleteTemplate, out)
+}
+
+func deleteMulti(ctx context.Context, cfg *config.Config, deleteTemplate bool, out io.Writer) error {
+	last := len(cfg.Clusters) - 1
+
+	for i, spec := range cfg.Clusters {
+		clusterCfg := cfg.ToClusterConfig(spec)
+
+		fmt.Fprintln(out)
+		ui.Section(out, fmt.Sprintf("=== Deleting cluster: %s ===", spec.ClusterName))
+
+		// Delete the shared template only with the last cluster.
+		deleteThisTemplate := deleteTemplate && i == last
+
+		if err := deleteSingle(ctx, clusterCfg, deleteThisTemplate, out); err != nil {
+			ui.Warn(out, "error deleting %s: %v (continuing)", spec.ClusterName, err)
+		}
+	}
+
+	fmt.Fprintln(out)
+	ui.Success(out, "All clusters deleted")
+	return nil
+}
+
+func deleteSingle(ctx context.Context, cfg *config.Config, deleteTemplate bool, out io.Writer) error {
 	px, err := pxclient.New(cfg)
 	if err != nil {
 		return err
@@ -29,26 +57,15 @@ func Delete(ctx context.Context, cfg *config.Config, deleteTemplate bool, out io
 		ui.Success(out, "found %d VM(s)", len(vms))
 	}
 
-	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		errs []error
-	)
+	g, ctx := errgroup.WithContext(ctx)
 	for _, vm := range vms {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-			if err := pxclient.DeleteVM(ctx, px, name, out); err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-			}
-		}(vm.Name)
+		name := vm.Name
+		g.Go(func() error {
+			return pxclient.DeleteVM(ctx, px, name, out)
+		})
 	}
-	wg.Wait()
-
-	if len(errs) > 0 {
-		return fmt.Errorf("errors during VM deletion: %v", errs)
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("deleting VMs: %w", err)
 	}
 
 	if deleteTemplate {

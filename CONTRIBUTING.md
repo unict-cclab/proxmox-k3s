@@ -1,17 +1,17 @@
-# Contributing
+﻿# Contributing
 
 Thank you for your interest in contributing to proxmox-k3s!
 
 ## Prerequisites
 
-- Go 1.21 or later
+- Go 1.25 or later
 - A Proxmox VE 8/9 environment (for integration testing)
 - [golangci-lint](https://golangci-lint.run/usage/install/) for linting
 
 ## Development setup
 
 ```bash
-git clone https://github.com/amarchese96/proxmox-k3s.git
+git clone https://github.com/unict-cclab/proxmox-k3s.git
 cd proxmox-k3s
 go mod download
 ```

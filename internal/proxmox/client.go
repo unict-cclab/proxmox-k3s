@@ -1,4 +1,4 @@
-package proxmox
+﻿package proxmox
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 	pxapi "github.com/luthermonson/go-proxmox"
 
-	"github.com/amarchese96/proxmox-k3s/internal/config"
+	"github.com/unict-cclab/proxmox-k3s/internal/config"
 )
 
 type Client struct {
@@ -42,6 +42,8 @@ func New(cfg *config.Config) (*Client, error) {
 	return &Client{api: api, cfg: cfg, httpClient: httpClient}, nil
 }
 
+// ConfigVM posts a VM config update via raw HTTP because go-proxmox does not
+// expose the POST /nodes/{node}/qemu/{vmid}/config endpoint.
 func (c *Client) ConfigVM(ctx context.Context, node string, vmid int, formBody string) (*pxapi.Task, error) {
 	endpoint := strings.TrimRight(c.cfg.Proxmox.APIURL, "/") + fmt.Sprintf("/nodes/%s/qemu/%d/config", node, vmid)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formBody))
@@ -174,15 +176,9 @@ func hasTag(tags, target string) bool {
 
 func splitTags(tags string) []string {
 	var out []string
-	for _, t := range []string{tags} {
-		start := 0
-		for i := 0; i <= len(t); i++ {
-			if i == len(t) || t[i] == ';' {
-				if tok := t[start:i]; tok != "" {
-					out = append(out, tok)
-				}
-				start = i + 1
-			}
+	for _, t := range strings.Split(tags, ";") {
+		if t != "" {
+			out = append(out, t)
 		}
 	}
 	return out

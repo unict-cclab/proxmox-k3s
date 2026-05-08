@@ -1,4 +1,4 @@
-package proxmox
+﻿package proxmox
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 
 	pxapi "github.com/luthermonson/go-proxmox"
 
-	"github.com/amarchese96/proxmox-k3s/internal/config"
+	"github.com/unict-cclab/proxmox-k3s/internal/config"
 )
 
 func TestConfigVMUsesFormEncodedBody(t *testing.T) {

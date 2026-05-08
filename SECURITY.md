@@ -1,4 +1,4 @@
-# Security Policy
+﻿# Security Policy
 
 ## Supported versions
 
@@ -8,7 +8,7 @@ Only the latest release receives security fixes.
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
-Report them privately via [GitHub Security Advisories](https://github.com/amarchese96/proxmox-k3s/security/advisories/new).
+Report them privately via [GitHub Security Advisories](https://github.com/unict-cclab/proxmox-k3s/security/advisories/new).
 
 Include:
 

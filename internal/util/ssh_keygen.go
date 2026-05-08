@@ -34,7 +34,7 @@ func EnsureKeyPair(stateDir string) (*KeyPair, error) {
 		return nil, fmt.Errorf("generating ed25519 key: %w", err)
 	}
 
-	pemBlock, err := ssh.MarshalPrivateKey(priv, "proxmox-k3s")
+	pemBlock, err := ssh.MarshalPrivateKey(priv, "")
 	if err != nil {
 		return nil, fmt.Errorf("marshaling private key: %w", err)
 	}

@@ -1,17 +1,18 @@
-package main
+﻿package main
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/amarchese96/proxmox-k3s/internal/cluster"
-	"github.com/amarchese96/proxmox-k3s/internal/config"
-	pxclient "github.com/amarchese96/proxmox-k3s/internal/proxmox"
-	"github.com/amarchese96/proxmox-k3s/internal/ui"
-	"github.com/amarchese96/proxmox-k3s/internal/util"
+	"github.com/unict-cclab/proxmox-k3s/internal/cluster"
+	"github.com/unict-cclab/proxmox-k3s/internal/config"
+	pxclient "github.com/unict-cclab/proxmox-k3s/internal/proxmox"
+	"github.com/unict-cclab/proxmox-k3s/internal/ui"
+	"github.com/unict-cclab/proxmox-k3s/internal/util"
 )
 
 // version is set at build time via -ldflags "-X main.version=<tag>".
@@ -81,8 +82,12 @@ is fast; pass --template to remove it too.`,
 				return err
 			}
 
-			fmt.Fprintf(os.Stdout, "%s This will DELETE all VMs for cluster %q. Continue? [y/N] ",
-				ui.PromptPrefix("warn"), cfg.ClusterName)
+			target := cfg.Clusters[0].ClusterName
+			if len(cfg.Clusters) > 1 {
+				target = fmt.Sprintf("%d clusters", len(cfg.Clusters))
+			}
+			fmt.Fprintf(os.Stdout, "%s This will DELETE all VMs for %s. Continue? [y/N] ",
+				ui.PromptPrefix("warn"), target)
 			var answer string
 			fmt.Scanln(&answer)
 			if answer != "y" && answer != "Y" {
@@ -112,7 +117,16 @@ func kubeconfigCmd() *cobra.Command {
 				return err
 			}
 
-			stateDir, err := config.StateDirForCluster(cfg.ClusterName)
+			clusterName, _ := cmd.Flags().GetString("cluster")
+			spec := cfg.Clusters[0]
+			for _, s := range cfg.Clusters {
+				if s.ClusterName == clusterName {
+					spec = s
+					break
+				}
+			}
+
+			stateDir, err := config.StateDirForCluster(spec.ClusterName)
 			if err != nil {
 				return err
 			}
@@ -127,13 +141,13 @@ func kubeconfigCmd() *cobra.Command {
 				return err
 			}
 
-			cpName := config.PrefixedNodeName(cfg.ClusterName, cfg.ControlPlane[0].Name)
+			cpName := config.PrefixedNodeName(spec.ClusterName, spec.ControlPlane[0].Name)
 			vm, err := px.FindVMByName(context.Background(), cpName)
 			if err != nil || vm == nil {
 				return fmt.Errorf("control-plane VM %q not found; has the cluster been created?", cpName)
 			}
 
-			ip := cfg.ControlPlane[0].IP
+			ip := spec.ControlPlane[0].IP
 			if ip == "" {
 				ip, err = pxclient.WaitForIP(context.Background(), vm, 30e9)
 				if err != nil {
@@ -155,20 +169,21 @@ func kubeconfigCmd() *cobra.Command {
 				return fmt.Errorf("reading kubeconfig: empty kubeconfig")
 			}
 
-			kubeconfig := rewriteKubeconfig(raw, ip, cfg.ClusterName)
+			kubeconfig := rewriteKubeconfig(raw, ip, spec.ClusterName)
 			if kubeconfig == "" {
 				return fmt.Errorf("rewriting kubeconfig: empty kubeconfig")
 			}
-			if err := os.WriteFile(cfg.KubeconfigPath, []byte(kubeconfig), 0600); err != nil {
+			if err := os.WriteFile(spec.KubeconfigPath, []byte(kubeconfig), 0600); err != nil {
 				return fmt.Errorf("writing kubeconfig: %w", err)
 			}
 
-			fmt.Fprintf(os.Stdout, "Kubeconfig saved to %s\n", cfg.KubeconfigPath)
+			fmt.Fprintf(os.Stdout, "Kubeconfig saved to %s\n", spec.KubeconfigPath)
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	cmd.Flags().String("cluster", "", "cluster name to fetch kubeconfig for (default: first cluster)")
 	return cmd
 }
 
@@ -188,7 +203,7 @@ func templateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			stateDir, err := config.StateDirForCluster(cfg.ClusterName)
+			stateDir, err := config.StateDirForCluster(cfg.Clusters[0].ClusterName)
 			if err != nil {
 				return err
 			}
@@ -227,37 +242,10 @@ func templateCmd() *cobra.Command {
 }
 
 func rewriteKubeconfig(raw, ip, clusterName string) string {
-	r := raw
-	r = replaceAll(r, "https://127.0.0.1:6443", "https://"+ip+":6443")
-	r = replaceAll(r, "name: default", "name: "+clusterName)
-	r = replaceAll(r, "cluster: default", "cluster: "+clusterName)
-	r = replaceAll(r, "user: default", "user: "+clusterName)
-	r = replaceAll(r, "current-context: default", "current-context: "+clusterName)
+	r := strings.ReplaceAll(raw, "https://127.0.0.1:6443", "https://"+ip+":6443")
+	r = strings.ReplaceAll(r, "name: default", "name: "+clusterName)
+	r = strings.ReplaceAll(r, "cluster: default", "cluster: "+clusterName)
+	r = strings.ReplaceAll(r, "user: default", "user: "+clusterName)
+	r = strings.ReplaceAll(r, "current-context: default", "current-context: "+clusterName)
 	return r
-}
-
-func replaceAll(s, old, new string) string {
-	result := ""
-	for {
-		idx := indexOf(s, old)
-		if idx < 0 {
-			result += s
-			break
-		}
-		result += s[:idx] + new
-		s = s[idx+len(old):]
-	}
-	return result
-}
-
-func indexOf(s, substr string) int {
-	if len(substr) == 0 {
-		return 0
-	}
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }

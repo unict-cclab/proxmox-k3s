@@ -1,0 +1,94 @@
+# proxmox-k3s multi-cluster configuration
+# Provisions multiple k3s clusters and connects them via Cilium cluster mesh.
+# Run with: proxmox-k3s create -c multi-cluster.yaml
+
+# Shared Proxmox credentials used by every cluster.
+proxmox:
+  api_url: https://192.168.1.10:8006/api2/json
+  token_id: root@pam!mytoken
+  token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  insecure_tls: true            # accept self-signed PVE certs (common in homelabs)
+
+# Shared VM template — built once and cloned for all clusters.
+template:
+  proxmox_node: pve1            # node where the template is built
+  storage: local-lvm            # must support "images" content type
+  os: ubuntu-24.04
+  bridge: vmbr0
+
+# Add-ons installed on every cluster after k3s is up.
+addons:
+  cilium:
+    enabled: true
+    version: "1.16.5"           # Cilium Helm chart version
+    cluster_mesh: true          # connect all clusters into a single mesh
+  monitoring:
+    enabled: true
+    prometheus_node_port: 32090 # NodePort for Prometheus
+    grafana_node_port: 32000    # NodePort for Grafana
+    grafana_admin_password: "admin"
+
+# Per-cluster definitions.
+# Each cluster gets a unique cilium_cluster_id (1-255) required for the mesh.
+# When cilium.enabled is true, --flannel-backend=none and --disable-network-policy
+# are automatically appended to k3s extra_server_args.
+clusters:
+  - cluster_name: cluster-01
+    cilium_cluster_id: 1        # must be unique across all clusters
+    kubeconfig_path: ./kubeconfig-cluster-01
+    k3s:
+      version: v1.32.3+k3s1
+      extra_server_args: "--disable=traefik --disable=servicelb"
+    control_plane:
+      - name: cp-01
+        proxmox_node: pve1
+        cores: 4
+        memory: 8192
+        disk_size: 40
+        ip: 192.168.1.100
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
+    workers:
+      - name: worker-01
+        proxmox_node: pve1
+        cores: 4
+        memory: 8192
+        disk_size: 40
+        ip: 192.168.1.110
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
+        labels:
+          - "nodepool=workers"
+        taints: []
+
+  - cluster_name: cluster-02
+    cilium_cluster_id: 2
+    kubeconfig_path: ./kubeconfig-cluster-02
+    k3s:
+      version: v1.32.3+k3s1
+      extra_server_args: "--disable=traefik --disable=servicelb"
+    control_plane:
+      - name: cp-01
+        proxmox_node: pve2
+        cores: 4
+        memory: 8192
+        disk_size: 40
+        ip: 192.168.1.200
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
+    workers:
+      - name: worker-01
+        proxmox_node: pve2
+        cores: 4
+        memory: 8192
+        disk_size: 40
+        ip: 192.168.1.210
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
+        labels:
+          - "nodepool=workers"
+        taints: []

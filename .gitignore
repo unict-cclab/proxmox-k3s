@@ -11,7 +11,8 @@ dist/
 
 # Local runtime/config artifacts
 cluster.yaml
-kubeconfig
+multi-cluster.yaml
+kubeconfig*
 
 # Go test coverage
 coverage.out
