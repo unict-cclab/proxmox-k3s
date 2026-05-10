@@ -19,9 +19,9 @@ const (
 // InstallMonitoring installs kube-prometheus-stack via Helm.
 // Prometheus is exposed on addon.PrometheusNodePort and Grafana on addon.GrafanaNodePort.
 // Both use the local-path storage class that k3s ships with by default.
-func InstallMonitoring(runner *util.Runner, addon config.MonitoringAddon, clusterName string, out io.Writer) error {
+func InstallMonitoring(runner *util.Runner, addon config.MonitoringConfig, clusterName string, out io.Writer) error {
 	ui.Step(out, "[%s] adding prometheus-community Helm repo...", clusterName)
-	if err := helmAddRepo(runner, "prometheus-community", prometheusCommRepo); err != nil {
+	if err := helmAddRepo(runner, "prometheus-community", prometheusCommRepo, out); err != nil {
 		return err
 	}
 
@@ -29,6 +29,21 @@ func InstallMonitoring(runner *util.Runner, addon config.MonitoringAddon, cluste
   enabled: false
 
 grafana:
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: nodepool
+            operator: In
+            values:
+            - management
+  tolerations:
+  - key: "nodepool"
+    operator: "Equal"
+    value: "management"
+    effect: "NoSchedule"
   service:
     type: NodePort
     nodePort: %d
@@ -41,7 +56,22 @@ grafana:
       - ReadWriteOnce
     size: 1Gi
 
-prometheusOperator: {}
+prometheusOperator:
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: nodepool
+            operator: In
+            values:
+            - management
+  tolerations:
+  - key: "nodepool"
+    operator: "Equal"
+    value: "management"
+    effect: "NoSchedule"
 
 prometheus:
   service:
@@ -50,6 +80,21 @@ prometheus:
   prometheusSpec:
     retention: 7d
     scrapeInterval: "5s"
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: nodepool
+              operator: In
+              values:
+              - management
+    tolerations:
+    - key: "nodepool"
+      operator: "Equal"
+      value: "management"
+      effect: "NoSchedule"
     storageSpec:
       volumeClaimTemplate:
         spec:
@@ -58,15 +103,24 @@ prometheus:
           resources:
             requests:
               storage: 5Gi
+prometheus-node-exporter:
+  prometheus:
+    monitor:
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_node_name
+          targetLabel: instance
 `,
 		addon.GrafanaNodePort,
 		addon.GrafanaAdminPassword,
 		addon.PrometheusNodePort,
 	)
 
-	ui.Step(out, "[%s] installing kube-prometheus-stack (Prometheus :%d, Grafana :%d)...",
-		clusterName, addon.PrometheusNodePort, addon.GrafanaNodePort)
-	if err := helmInstall(runner, monitoringRelease, monitoringChart, monitoringNamespace, values, out); err != nil {
+	chart := fmt.Sprintf("%s --version %s", monitoringChart, addon.Version)
+	ui.Step(out, "[%s] installing kube-prometheus-stack %s (Prometheus :%d, Grafana :%d)...",
+		clusterName, addon.Version, addon.PrometheusNodePort, addon.GrafanaNodePort)
+	if err := helmInstall(runner, monitoringRelease, chart, monitoringNamespace, values, "20m", out); err != nil {
 		return err
 	}
 

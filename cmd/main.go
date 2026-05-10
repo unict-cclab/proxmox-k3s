@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/unict-cclab/proxmox-k3s/internal/cluster"
 	"github.com/unict-cclab/proxmox-k3s/internal/config"
+	"github.com/unict-cclab/proxmox-k3s/internal/k3s"
 	pxclient "github.com/unict-cclab/proxmox-k3s/internal/proxmox"
 	"github.com/unict-cclab/proxmox-k3s/internal/ui"
 	"github.com/unict-cclab/proxmox-k3s/internal/util"
@@ -28,35 +28,33 @@ func rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "proxmox-k3s",
 		Short:   "Provision and manage k3s clusters on Proxmox VE",
-		Long:    `proxmox-k3s creates production-ready k3s clusters on Proxmox VE with a single config file and a single command.`,
 		Version: version,
 	}
 
 	root.AddCommand(
-		createCmd(),
-		deleteCmd(),
-		kubeconfigCmd(),
+		setupAllCmd(),
+		deleteAllCmd(),
+		clusterCmd(),
 		templateCmd(),
+		registryCmd(),
+		nfsCmd(),
+		meshCmd(),
 	)
 	return root
 }
 
-func createCmd() *cobra.Command {
+func setupAllCmd() *cobra.Command {
 	var configPath string
 
 	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create a k3s cluster",
-		Long: `Provisions VMs on Proxmox, installs k3s, and writes a kubeconfig.
-
-Idempotent: already-existing VMs and an already-running k3s installation are
-detected and skipped, so re-running after a partial failure is safe.`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use:   "setup-all",
+		Short: "Provision everything from scratch: template → registry → clusters → mesh",
+		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
 				return err
 			}
-			return cluster.Create(context.Background(), cfg, os.Stdout)
+			return cluster.Setup(context.Background(), cfg, os.Stdout)
 		},
 	}
 
@@ -64,25 +62,116 @@ detected and skipped, so re-running after a partial failure is safe.`,
 	return cmd
 }
 
+func deleteAllCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "delete-all",
+		Short: "Tear down everything: clusters → registry → template",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "%s This will DELETE all clusters, the registry, and the template. Continue? [y/N] ",
+				ui.PromptPrefix("warn"))
+			var answer string
+			fmt.Scanln(&answer)
+			if answer != "y" && answer != "Y" {
+				ui.Warn(os.Stdout, "Aborted.")
+				return nil
+			}
+			return cluster.Teardown(context.Background(), cfg, os.Stdout)
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	return cmd
+}
+
+func clusterCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cluster",
+		Short: "Manage k3s clusters",
+	}
+	cmd.AddCommand(createCmd(), deleteCmd(), kubeconfigCmd())
+	return cmd
+}
+
+func createCmd() *cobra.Command {
+	var (
+		configPath   string
+		clusterNames []string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a k3s cluster",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if len(clusterNames) > 0 {
+				var filtered []config.ClusterSpec
+				for _, name := range clusterNames {
+					found := false
+					for _, spec := range cfg.Clusters {
+						if spec.Name == name {
+							filtered = append(filtered, spec)
+							found = true
+							break
+						}
+					}
+					if !found {
+						return fmt.Errorf("cluster %q not found in config", name)
+					}
+				}
+				cfg.Clusters = filtered
+			}
+			return cluster.Create(context.Background(), cfg, os.Stdout)
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	cmd.Flags().StringArrayVar(&clusterNames, "cluster", nil, "cluster name to create (repeatable; default: all)")
+	return cmd
+}
+
 func deleteCmd() *cobra.Command {
 	var (
-		configPath     string
-		deleteTemplate bool
+		configPath   string
+		clusterNames []string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete a k3s cluster and its VMs",
-		Long: `Stops and removes all VMs belonging to the cluster (identified via
-Proxmox tags). The VM template is kept by default so re-creating the cluster
-is fast; pass --template to remove it too.`,
+		Short: "Delete k3s cluster VMs",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
 				return err
 			}
 
-			target := cfg.Clusters[0].ClusterName
+			if len(clusterNames) > 0 {
+				var filtered []config.ClusterSpec
+				for _, name := range clusterNames {
+					found := false
+					for _, spec := range cfg.Clusters {
+						if spec.Name == name {
+							filtered = append(filtered, spec)
+							found = true
+							break
+						}
+					}
+					if !found {
+						return fmt.Errorf("cluster %q not found in config", name)
+					}
+				}
+				cfg.Clusters = filtered
+			}
+
+			target := cfg.Clusters[0].Name
 			if len(cfg.Clusters) > 1 {
 				target = fmt.Sprintf("%d clusters", len(cfg.Clusters))
 			}
@@ -95,12 +184,12 @@ is fast; pass --template to remove it too.`,
 				return nil
 			}
 
-			return cluster.Delete(context.Background(), cfg, deleteTemplate, os.Stdout)
+			return cluster.Delete(context.Background(), cfg, os.Stdout)
 		},
 	}
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
-	cmd.Flags().BoolVar(&deleteTemplate, "template", false, "also delete the VM template")
+	cmd.Flags().StringArrayVar(&clusterNames, "cluster", nil, "cluster name to delete (repeatable; default: all)")
 	return cmd
 }
 
@@ -110,7 +199,6 @@ func kubeconfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kubeconfig",
 		Short: "Re-fetch and save the cluster kubeconfig",
-		Long:  `Connects to the first control-plane node and refreshes the kubeconfig file.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -120,18 +208,17 @@ func kubeconfigCmd() *cobra.Command {
 			clusterName, _ := cmd.Flags().GetString("cluster")
 			spec := cfg.Clusters[0]
 			for _, s := range cfg.Clusters {
-				if s.ClusterName == clusterName {
+				if s.Name == clusterName {
 					spec = s
 					break
 				}
 			}
 
-			stateDir, err := config.StateDirForCluster(spec.ClusterName)
+			keyPath, err := cfg.SSHKeyFilePath()
 			if err != nil {
 				return err
 			}
-
-			keyPair, err := util.EnsureKeyPair(stateDir)
+			keyPair, err := util.EnsureKeyPairAt(keyPath)
 			if err != nil {
 				return err
 			}
@@ -141,7 +228,7 @@ func kubeconfigCmd() *cobra.Command {
 				return err
 			}
 
-			cpName := config.PrefixedNodeName(spec.ClusterName, spec.ControlPlane[0].Name)
+			cpName := config.PrefixedNodeName(spec.Name, spec.ControlPlane[0].Name)
 			vm, err := px.FindVMByName(context.Background(), cpName)
 			if err != nil || vm == nil {
 				return fmt.Errorf("control-plane VM %q not found; has the cluster been created?", cpName)
@@ -169,7 +256,7 @@ func kubeconfigCmd() *cobra.Command {
 				return fmt.Errorf("reading kubeconfig: empty kubeconfig")
 			}
 
-			kubeconfig := rewriteKubeconfig(raw, ip, spec.ClusterName)
+			kubeconfig := k3s.RewriteKubeconfig(raw, ip, spec.Name)
 			if kubeconfig == "" {
 				return fmt.Errorf("rewriting kubeconfig: empty kubeconfig")
 			}
@@ -203,11 +290,11 @@ func templateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			stateDir, err := config.StateDirForCluster(cfg.Clusters[0].ClusterName)
+			keyPath, err := cfg.SSHKeyFilePath()
 			if err != nil {
 				return err
 			}
-			keyPair, err := util.EnsureKeyPair(stateDir)
+			keyPair, err := util.EnsureKeyPairAt(keyPath)
 			if err != nil {
 				return err
 			}
@@ -241,11 +328,137 @@ func templateCmd() *cobra.Command {
 	return cmd
 }
 
-func rewriteKubeconfig(raw, ip, clusterName string) string {
-	r := strings.ReplaceAll(raw, "https://127.0.0.1:6443", "https://"+ip+":6443")
-	r = strings.ReplaceAll(r, "name: default", "name: "+clusterName)
-	r = strings.ReplaceAll(r, "cluster: default", "cluster: "+clusterName)
-	r = strings.ReplaceAll(r, "user: default", "user: "+clusterName)
-	r = strings.ReplaceAll(r, "current-context: default", "current-context: "+clusterName)
-	return r
+func registryCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "registry",
+		Short: "Manage the Harbor pull-through cache registry VM",
+	}
+
+	createSub := &cobra.Command{
+		Use:   "create",
+		Short: "Provision the Harbor registry VM (runs automatically during cluster create)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if cfg.Registry == nil {
+				return fmt.Errorf("no registry block found in config")
+			}
+			endpoint, err := cluster.CreateRegistry(context.Background(), cfg, os.Stdout)
+			if err != nil {
+				return err
+			}
+			ui.Success(os.Stdout, "Registry ready at %s", endpoint)
+			return nil
+		},
+	}
+
+	deleteSub := &cobra.Command{
+		Use:   "delete",
+		Short: "Remove the Harbor registry VM",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if cfg.Registry == nil {
+				return fmt.Errorf("no registry block found in config")
+			}
+			fmt.Fprintf(os.Stdout, "%s This will DELETE the registry VM %q. Continue? [y/N] ",
+				ui.PromptPrefix("warn"), cfg.Registry.VM.Name)
+			var answer string
+			fmt.Scanln(&answer)
+			if answer != "y" && answer != "Y" {
+				ui.Warn(os.Stdout, "Aborted.")
+				return nil
+			}
+			return cluster.DeleteRegistry(context.Background(), cfg, os.Stdout)
+		},
+	}
+
+	createSub.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	deleteSub.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	cmd.AddCommand(createSub, deleteSub)
+	return cmd
 }
+
+func nfsCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "nfs",
+		Short: "Manage the NFS server VM",
+	}
+
+	createSub := &cobra.Command{
+		Use:   "create",
+		Short: "Provision the NFS server VM (runs automatically during setup-all)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if cfg.NFS == nil {
+				return fmt.Errorf("no nfs block found in config")
+			}
+			return cluster.CreateNFSServer(context.Background(), cfg, os.Stdout)
+		},
+	}
+
+	deleteSub := &cobra.Command{
+		Use:   "delete",
+		Short: "Remove the NFS server VM",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if cfg.NFS == nil {
+				return fmt.Errorf("no nfs block found in config")
+			}
+			fmt.Fprintf(os.Stdout, "%s This will DELETE the NFS server VM %q. Continue? [y/N] ",
+				ui.PromptPrefix("warn"), cfg.NFS.VM.Name)
+			var answer string
+			fmt.Scanln(&answer)
+			if answer != "y" && answer != "Y" {
+				ui.Warn(os.Stdout, "Aborted.")
+				return nil
+			}
+			return cluster.DeleteNFSServer(context.Background(), cfg, os.Stdout)
+		},
+	}
+
+	createSub.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	deleteSub.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	cmd.AddCommand(createSub, deleteSub)
+	return cmd
+}
+
+func meshCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "mesh",
+		Short: "Manage Cilium cluster mesh",
+	}
+
+	connectSub := &cobra.Command{
+		Use:   "connect",
+		Short: "Connect clusters into a Cilium cluster mesh",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			return cluster.SetupMesh(context.Background(), cfg, os.Stdout)
+		},
+	}
+
+	connectSub.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
+	cmd.AddCommand(connectSub)
+	return cmd
+}
+

@@ -116,6 +116,7 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 			"nameserver": spec.DNS,
 			"tags":       tag,
 			"onboot":     "1",
+			"ciupgrade":  "0",
 		})
 
 		configTask, err := c.ConfigVM(ctx, spec.ProxmoxNode, vmid, body)

@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -19,8 +21,7 @@ import (
 	"github.com/unict-cclab/proxmox-k3s/internal/util"
 )
 
-// clusterState holds per-cluster data needed for post-creation steps
-// (addon installation, cluster mesh wiring).
+// clusterState holds per-cluster data needed for post-creation steps.
 type clusterState struct {
 	spec       config.ClusterSpec
 	cpIP       string
@@ -28,95 +29,383 @@ type clusterState struct {
 	keyPath    string
 }
 
-// Create provisions all clusters defined in the config.
-func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
-	return createMulti(ctx, cfg, out)
-}
 
-func createMulti(ctx context.Context, cfg *config.Config, out io.Writer) error {
-	states := make([]*clusterState, 0, len(cfg.Clusters))
+// Setup provisions everything end-to-end:
+// template → registry → clusters → mesh.
+// Use this when starting from scratch.
+func Setup(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	keyPath, err := cfg.SSHKeyFilePath()
+	if err != nil {
+		return fmt.Errorf("SSH key path: %w", err)
+	}
+	keyPair, err := util.EnsureKeyPairAt(keyPath)
+	if err != nil {
+		return fmt.Errorf("SSH key pair: %w", err)
+	}
 
-	for _, spec := range cfg.Clusters {
-		clusterCfg := cfg.ToClusterConfig(spec)
+	px, err := pxclient.New(cfg)
+	if err != nil {
+		return err
+	}
 
-		fmt.Fprintln(out)
-		ui.Section(out, fmt.Sprintf("=== Cluster: %s ===", spec.ClusterName))
+	ui.Section(out, "VM template")
+	if err := pxclient.EnsureTemplate(ctx, px, cfg, keyPair.PrivateKeyPath, keyPair.PublicKey, out); err != nil {
+		return err
+	}
 
-		if err := createSingle(ctx, clusterCfg, out); err != nil {
-			return fmt.Errorf("cluster %s: %w", spec.ClusterName, err)
-		}
+	if err := resolveK3sVersions(ctx, cfg, out); err != nil {
+		return err
+	}
 
-		kubeconfig, err := os.ReadFile(clusterCfg.KubeconfigPath)
+	var registryEndpoint string
+	if cfg.Registry != nil {
+		endpoint, err := CreateRegistry(ctx, cfg, out)
 		if err != nil {
-			return fmt.Errorf("reading kubeconfig for %s: %w", spec.ClusterName, err)
+			return err
 		}
+		registryEndpoint = endpoint
+	}
 
-		stateDir, err := config.StateDirForCluster(spec.ClusterName)
-		if err != nil {
-			return fmt.Errorf("state dir for %s: %w", spec.ClusterName, err)
-		}
-		keyPair, err := util.EnsureKeyPair(stateDir)
-		if err != nil {
-			return fmt.Errorf("key pair for %s: %w", spec.ClusterName, err)
-		}
-
-		st := &clusterState{
-			spec:       spec,
-			cpIP:       clusterCfg.ControlPlane[0].IP,
-			kubeconfig: kubeconfig,
-			keyPath:    keyPair.PrivateKeyPath,
-		}
-		states = append(states, st)
-
-		if cfg.Addons.Cilium.Enabled || cfg.Addons.Monitoring.Enabled {
-			if err := installAddons(cfg, st, out); err != nil {
-				return err
-			}
+	if cfg.NFS != nil {
+		if err := CreateNFSServer(ctx, cfg, out); err != nil {
+			return err
 		}
 	}
 
-	if cfg.Addons.Cilium.Enabled && cfg.Addons.Cilium.ClusterMesh && len(states) > 1 {
-		if err := connectMesh(cfg, states, out); err != nil {
+	states, err := provisionClusters(ctx, cfg, px, keyPath, registryEndpoint, out)
+	if err != nil {
+		return err
+	}
+	if len(cfg.ClusterMesh) > 1 && allMeshClustersPresent(cfg, states) {
+		return connectMesh(cfg, states, out)
+	}
+	return nil
+}
+
+// Create provisions clusters only. The VM template must already exist and,
+// if a registry is configured, it must be reachable. Returns an error with
+// a clear remediation hint if either prerequisite is not met.
+func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	keyPath, err := cfg.SSHKeyFilePath()
+	if err != nil {
+		return fmt.Errorf("SSH key path: %w", err)
+	}
+
+	px, err := pxclient.New(cfg)
+	if err != nil {
+		return err
+	}
+
+	ui.Step(out, "verifying prerequisites...")
+	if err := checkTemplateExists(ctx, px, cfg); err != nil {
+		return err
+	}
+
+	var registryEndpoint string
+	if cfg.Registry != nil {
+		if err := checkRegistryReachable(cfg.Registry.Harbor); err != nil {
 			return err
 		}
+		registryEndpoint = fmt.Sprintf("http://%s:%d",
+			cfg.Registry.Harbor.Hostname, cfg.Registry.Harbor.HTTPPort)
+	}
+	ui.Success(out, "prerequisites OK")
+
+	if err := resolveK3sVersions(ctx, cfg, out); err != nil {
+		return err
+	}
+
+	_, err = provisionClusters(ctx, cfg, px, keyPath, registryEndpoint, out)
+	return err
+}
+
+// provisionClusters pre-allocates VMIDs, creates all clusters in parallel,
+// installs addons, and connects the mesh when all mesh clusters are present.
+// The caller is responsible for ensuring the template exists before calling.
+func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Client, keyPath string, registryEndpoint string, out io.Writer) ([]*clusterState, error) {
+	// Pre-allocate VMID ranges sequentially to avoid races during parallel creation.
+	nextVMID := cfg.Template.VMIDBase + 1
+	vmidBases := make([]int, len(cfg.Clusters))
+	for i, spec := range cfg.Clusters {
+		base, err := px.NextVMID(ctx, nextVMID)
+		if err != nil {
+			return nil, fmt.Errorf("allocating VMIDs for cluster %s: %w", spec.Name, err)
+		}
+		vmidBases[i] = base
+		nextVMID = base + len(spec.ControlPlane) + len(spec.Workers)
+	}
+
+	states := make([]*clusterState, len(cfg.Clusters))
+
+	g, gctx := errgroup.WithContext(ctx)
+	for i, spec := range cfg.Clusters {
+		i, spec := i, spec
+		g.Go(func() error {
+			pw := util.NewPrefixWriter(spec.Name, out)
+			clusterCfg := cfg.ToClusterConfig(spec)
+
+			if err := createSingle(gctx, clusterCfg, vmidBases[i], registryEndpoint, pw); err != nil {
+				return fmt.Errorf("cluster %s: %w", spec.Name, err)
+			}
+
+			kp, err := util.EnsureKeyPairAt(keyPath)
+			if err != nil {
+				return fmt.Errorf("key pair for %s: %w", spec.Name, err)
+			}
+
+			kubeconfig, err := os.ReadFile(clusterCfg.KubeconfigPath)
+			if err != nil {
+				return fmt.Errorf("reading kubeconfig for %s: %w", spec.Name, err)
+			}
+
+			if err := installAddons(cfg, &clusterState{
+				spec:    spec,
+				cpIP:    clusterCfg.ControlPlane[0].IP,
+				keyPath: kp.PrivateKeyPath,
+			}, pw); err != nil {
+				return err
+			}
+
+			states[i] = &clusterState{
+				spec:       spec,
+				cpIP:       clusterCfg.ControlPlane[0].IP,
+				kubeconfig: kubeconfig,
+				keyPath:    kp.PrivateKeyPath,
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return states, err
 	}
 
 	fmt.Fprintln(out)
 	ui.Success(out, "All clusters ready — %d cluster(s)", len(states))
 	for _, st := range states {
-		ui.Info(out, "  %s  kubeconfig → %s", st.spec.ClusterName, st.spec.KubeconfigPath)
-		if cfg.Addons.Monitoring.Enabled {
+		ui.Info(out, "  %s  kubeconfig → %s", st.spec.Name, st.spec.KubeconfigPath)
+		if st.spec.Monitoring.Enabled {
 			ui.Info(out, "  %s  Prometheus :%d  Grafana :%d",
-				st.spec.ClusterName,
-				cfg.Addons.Monitoring.PrometheusNodePort,
-				cfg.Addons.Monitoring.GrafanaNodePort,
+				st.spec.Name,
+				st.spec.Monitoring.PrometheusNodePort,
+				st.spec.Monitoring.GrafanaNodePort,
 			)
+		}
+	}
+	if cfg.Registry != nil {
+		ui.Info(out, "  harbor  http://%s:%d", cfg.Registry.Harbor.Hostname, cfg.Registry.Harbor.HTTPPort)
+	}
+	return states, nil
+}
+
+// checkTemplateExists returns an error with a remediation hint if the
+// configured VM template is not found in Proxmox.
+func checkTemplateExists(ctx context.Context, px *pxclient.Client, cfg *config.Config) error {
+	name := pxclient.TemplateName(cfg)
+	vm, err := px.FindVMByName(ctx, name)
+	if err != nil {
+		return fmt.Errorf("looking up template: %w", err)
+	}
+	if vm == nil {
+		return fmt.Errorf("template %q not found — run 'proxmox-k3s template create' first", name)
+	}
+	return nil
+}
+
+// checkRegistryReachable returns an error with a remediation hint if the
+// Harbor ping endpoint does not respond with HTTP 200.
+func checkRegistryReachable(harbor config.HarborConfig) error {
+	url := fmt.Sprintf("http://%s:%d/api/v2.0/ping", harbor.Hostname, harbor.HTTPPort)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("registry at %s is not reachable — run 'proxmox-k3s registry create' first", url)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("registry at %s returned HTTP %d — is it running?", url, resp.StatusCode)
+	}
+	return nil
+}
+
+// resolveK3sVersions detects the latest k3s release once and fills it in for
+// any cluster that did not specify a version.
+func resolveK3sVersions(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	needsDetection := false
+	for _, spec := range cfg.Clusters {
+		if spec.K3s.Version == "" {
+			needsDetection = true
+			break
+		}
+	}
+	if !needsDetection {
+		return nil
+	}
+
+	ui.Section(out, "Detecting latest k3s version")
+	ver, err := k3s.LatestK3sVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("detecting k3s version: %w", err)
+	}
+	ui.Success(out, "using k3s %s", ver)
+
+	for i := range cfg.Clusters {
+		if cfg.Clusters[i].K3s.Version == "" {
+			cfg.Clusters[i].K3s.Version = ver
 		}
 	}
 	return nil
 }
 
-func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
-	runner, err := util.DialWithKey(st.cpIP, 22, "ubuntu", st.keyPath)
+// SetupMesh connects the clusters listed in cfg.ClusterMesh into a Cilium cluster mesh.
+// It reads kubeconfigs from disk and uses the static IPs from the config, so all mesh
+// clusters must already be running and their kubeconfig files must exist.
+func SetupMesh(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	if len(cfg.ClusterMesh) < 2 {
+		return fmt.Errorf("cluster_mesh requires at least 2 entries")
+	}
+
+	keyPath, err := cfg.SSHKeyFilePath()
 	if err != nil {
-		return fmt.Errorf("SSH to %s CP: %w", st.spec.ClusterName, err)
+		return fmt.Errorf("SSH key path: %w", err)
+	}
+
+	ui.Step(out, "verifying cluster connectivity...")
+	for _, entry := range cfg.ClusterMesh {
+		spec, err := findClusterSpec(cfg, entry.Cluster)
+		if err != nil {
+			return err
+		}
+		runner, err := util.DialWithKey(spec.ControlPlane[0].IP, 22, "ubuntu", keyPath)
+		if err != nil {
+			return fmt.Errorf("cluster %q control plane not reachable at %s — run 'proxmox-k3s cluster create' first",
+				entry.Cluster, spec.ControlPlane[0].IP)
+		}
+		runner.Close()
+	}
+	ui.Success(out, "all clusters reachable")
+
+	states := make([]*clusterState, 0, len(cfg.ClusterMesh))
+	for _, entry := range cfg.ClusterMesh {
+		spec, _ := findClusterSpec(cfg, entry.Cluster)
+
+		kubeconfig, err := os.ReadFile(spec.KubeconfigPath)
+		if err != nil {
+			return fmt.Errorf("reading kubeconfig for %s: %w", spec.Name, err)
+		}
+
+		states = append(states, &clusterState{
+			spec:       spec,
+			cpIP:       spec.ControlPlane[0].IP,
+			kubeconfig: kubeconfig,
+			keyPath:    keyPath,
+		})
+	}
+
+	return connectMesh(cfg, states, out)
+}
+
+func findClusterSpec(cfg *config.Config, name string) (config.ClusterSpec, error) {
+	for _, s := range cfg.Clusters {
+		if s.Name == name {
+			return s, nil
+		}
+	}
+	return config.ClusterSpec{}, fmt.Errorf("cluster %q listed in cluster_mesh not found in clusters", name)
+}
+
+func allMeshClustersPresent(cfg *config.Config, states []*clusterState) bool {
+	for _, entry := range cfg.ClusterMesh {
+		found := false
+		for _, st := range states {
+			if st.spec.Name == entry.Cluster {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// setupRegistry provisions the Harbor VM and installs Harbor on it.
+func setupRegistry(ctx context.Context, cfg *config.Config, px *pxclient.Client, vmid int, keyPair *util.KeyPair, out io.Writer) (string, error) {
+	r := cfg.Registry
+	ui.Section(out, "=== Registry VM ===")
+
+	spec := pxclient.VMSpec{
+		VMID:        vmid,
+		Name:        r.VM.Name,
+		ProxmoxNode: r.VM.ProxmoxNode,
+		Cores:       r.VM.Cores,
+		Memory:      r.VM.Memory,
+		DiskSize:    r.VM.DiskSize,
+		Storage:     r.VM.Storage,
+		Bridge:      r.VM.Bridge,
+		IPAddress:   r.VM.IP,
+		Gateway:     r.VM.Gateway,
+		DNS:         r.VM.DNS,
+		SubnetMask:  r.VM.SubnetMask,
+		User:        "ubuntu",
+		SSHPubKey:   keyPair.PublicKey,
+		ClusterName: "harbor",
+		Role:        "registry",
+	}
+
+	vmInfo, err := pxclient.CreateVM(ctx, px, cfg, spec, out)
+	if err != nil {
+		return "", fmt.Errorf("registry VM: %w", err)
+	}
+
+	runner, err := util.WaitForSSH(vmInfo.IP, 22, "ubuntu", keyPair.PrivateKeyPath, 5*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("SSH to registry VM: %w", err)
+	}
+	defer runner.Close()
+
+	if err := addons.InstallHarbor(runner, r.Harbor, out); err != nil {
+		return "", err
+	}
+
+	endpoint := fmt.Sprintf("http://%s:%d", r.Harbor.Hostname, r.Harbor.HTTPPort)
+	return endpoint, nil
+}
+
+func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
+	// Use WaitForSSH instead of DialWithKey: the CP may be briefly unreachable
+	// right after k3s starts (network stack flap, systemd restarts).
+	runner, err := util.WaitForSSH(st.cpIP, 22, "ubuntu", st.keyPath, 2*time.Minute)
+	if err != nil {
+		return fmt.Errorf("SSH to %s CP: %w", st.spec.Name, err)
 	}
 	defer runner.Close()
 
 	if err := addons.EnsureHelm(runner, out); err != nil {
-		return fmt.Errorf("[%s] Helm: %w", st.spec.ClusterName, err)
+		return fmt.Errorf("[%s] Helm: %w", st.spec.Name, err)
 	}
 
-	if cfg.Addons.Cilium.Enabled {
-		if err := addons.InstallCilium(runner, cfg.Addons.Cilium,
-			st.spec.ClusterName, st.spec.CiliumClusterID, out); err != nil {
+	if st.spec.Cilium.Enabled {
+		clusterID, inMesh := cfg.ClusterMeshID(st.spec.Name)
+		if err := addons.InstallCilium(runner, st.spec.Cilium, st.spec.Name, st.cpIP, clusterID, inMesh, out); err != nil {
 			return err
 		}
 	}
 
-	if cfg.Addons.Monitoring.Enabled {
-		if err := addons.InstallMonitoring(runner, cfg.Addons.Monitoring,
-			st.spec.ClusterName, out); err != nil {
+	if st.spec.Monitoring.Enabled {
+		if err := addons.InstallMonitoring(runner, st.spec.Monitoring, st.spec.Name, out); err != nil {
+			return err
+		}
+	}
+
+	if st.spec.Istio.Enabled {
+		if err := addons.InstallIstio(runner, st.spec.Istio, st.spec.Name, out); err != nil {
+			return err
+		}
+	}
+
+	if st.spec.NFS.Enabled {
+		if err := addons.InstallNFSCSI(runner, cfg.NFS.VM.IP, st.spec.Name, cfg.NFS.DataDir, st.spec.NFS, out); err != nil {
 			return err
 		}
 	}
@@ -132,20 +421,19 @@ func connectMesh(cfg *config.Config, states []*clusterState, out io.Writer) erro
 	for _, st := range states {
 		runner, err := util.DialWithKey(st.cpIP, 22, "ubuntu", st.keyPath)
 		if err != nil {
-			return fmt.Errorf("SSH to %s: %w", st.spec.ClusterName, err)
+			return fmt.Errorf("SSH to %s: %w", st.spec.Name, err)
 		}
-		err = addons.EnableClusterMesh(runner, st.spec.ClusterName, out)
+		err = addons.EnableClusterMesh(runner, st.spec.Name, out)
 		runner.Close()
 		if err != nil {
 			return err
 		}
 	}
 
-	// Connect each unique pair (i, j) where i < j; cilium connect is bidirectional.
 	for i, source := range states {
 		dests := make(map[string][]byte)
 		for _, dest := range states[i+1:] {
-			dests[dest.spec.ClusterName] = dest.kubeconfig
+			dests[dest.spec.Name] = dest.kubeconfig
 		}
 		if len(dests) == 0 {
 			continue
@@ -153,9 +441,9 @@ func connectMesh(cfg *config.Config, states []*clusterState, out io.Writer) erro
 
 		runner, err := util.DialWithKey(source.cpIP, 22, "ubuntu", source.keyPath)
 		if err != nil {
-			return fmt.Errorf("SSH to %s: %w", source.spec.ClusterName, err)
+			return fmt.Errorf("SSH to %s: %w", source.spec.Name, err)
 		}
-		err = addons.ConnectClusterMesh(runner, source.spec.ClusterName,
+		err = addons.ConnectClusterMesh(runner, source.spec.Name,
 			source.kubeconfig, dests, out)
 		runner.Close()
 		if err != nil {
@@ -167,14 +455,15 @@ func connectMesh(cfg *config.Config, states []*clusterState, out io.Writer) erro
 	return nil
 }
 
-func createSingle(ctx context.Context, cfg *config.Config, out io.Writer) error {
-	stateDir, err := config.StateDirForCluster(cfg.ClusterName)
+// createSingle provisions VMs and installs k3s for one cluster.
+func createSingle(ctx context.Context, cfg *config.Config, vmidBase int, registryEndpoint string, out io.Writer) error {
+	keyPath, err := cfg.SSHKeyFilePath()
 	if err != nil {
-		return fmt.Errorf("creating state dir: %w", err)
+		return fmt.Errorf("SSH key path: %w", err)
 	}
 
 	ui.Section(out, "SSH key pair")
-	keyPair, err := util.EnsureKeyPair(stateDir)
+	keyPair, err := util.EnsureKeyPairAt(keyPath)
 	if err != nil {
 		return fmt.Errorf("SSH key pair: %w", err)
 	}
@@ -184,27 +473,6 @@ func createSingle(ctx context.Context, cfg *config.Config, out io.Writer) error 
 	px, err := pxclient.New(cfg)
 	if err != nil {
 		return err
-	}
-
-	if cfg.K3s.Version == "" {
-		ui.Section(out, "Detecting latest k3s version")
-		ver, err := k3s.LatestK3sVersion(ctx)
-		if err != nil {
-			return fmt.Errorf("detecting k3s version: %w", err)
-		}
-		cfg.K3s.Version = ver
-		ui.Success(out, "using k3s %s", ver)
-	}
-
-	ui.Section(out, "VM template")
-	if err := pxclient.EnsureTemplate(ctx, px, cfg, keyPair.PrivateKeyPath, keyPair.PublicKey, out); err != nil {
-		return err
-	}
-
-	// Allocate all VM IDs in one Proxmox scan: CP nodes first, workers after.
-	vmidBase, err := px.NextVMID(ctx, cfg.Template.VMIDBase+1)
-	if err != nil {
-		return fmt.Errorf("allocating VMIDs: %w", err)
 	}
 
 	ui.Section(out, "Control-plane VMs")
@@ -220,6 +488,9 @@ func createSingle(ctx context.Context, cfg *config.Config, out io.Writer) error 
 	}
 
 	installer := k3s.New(cfg, keyPair.PrivateKeyPath, out)
+	if registryEndpoint != "" {
+		installer.SetRegistryEndpoint(registryEndpoint)
+	}
 
 	ui.Section(out, "Installing k3s")
 	token, firstCP, err := installControlPlane(installer, cfg, cpVMs)

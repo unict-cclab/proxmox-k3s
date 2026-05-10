@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,52 +19,116 @@ type Config struct {
 	ClusterName    string `yaml:"cluster_name"`
 	KubeconfigPath string `yaml:"kubeconfig_path"`
 
+	// SSHKeyPath is the path to the SSH private key used for all VMs.
+	// If empty the key is auto-generated and stored under
+	// ~/.proxmox-k3s/<cluster-name>/id_ed25519.
+	SSHKeyPath string `yaml:"ssh_key_path"`
+
 	// Shared across all modes
 	Proxmox  ProxmoxConfig  `yaml:"proxmox"`
 	Template TemplateConfig `yaml:"template"`
 
 	// Single-cluster k3s and node definitions
 	K3s          K3sConfig    `yaml:"k3s"`
+	PodCIDR      string       `yaml:"pod_cidr"`
+	ServiceCIDR  string       `yaml:"service_cidr"`
 	ControlPlane []CPNode     `yaml:"control_plane"`
 	Workers      []WorkerNode `yaml:"workers"`
 
 	// Multi-cluster fields; presence of Clusters activates multi-cluster mode
-	Clusters []ClusterSpec `yaml:"clusters"`
-	Addons   AddonsConfig  `yaml:"addons"`
+	Clusters    []ClusterSpec      `yaml:"clusters"`
+	ClusterMesh []ClusterMeshEntry `yaml:"cluster_mesh"`
+	Registry    *RegistryConfig    `yaml:"registry,omitempty"`
+	NFS         *NFSConfig         `yaml:"nfs,omitempty"`
 }
 
 // IsMultiCluster reports whether the config defines multiple clusters.
 func (c *Config) IsMultiCluster() bool { return len(c.Clusters) > 0 }
 
+// ClusterMeshID returns the Cilium cluster ID for the named cluster and whether
+// it is part of the cluster mesh.
+func (c *Config) ClusterMeshID(name string) (int, bool) {
+	for _, e := range c.ClusterMesh {
+		if e.Cluster == name {
+			return e.ID, true
+		}
+	}
+	return 0, false
+}
+
 // ClusterSpec is the per-cluster definition used in multi-cluster configs.
 type ClusterSpec struct {
-	ClusterName     string       `yaml:"cluster_name"`
-	KubeconfigPath  string       `yaml:"kubeconfig_path"`
-	CiliumClusterID int          `yaml:"cilium_cluster_id"`
-	K3s             K3sConfig    `yaml:"k3s"`
-	ControlPlane    []CPNode     `yaml:"control_plane"`
-	Workers         []WorkerNode `yaml:"workers"`
+	Name           string           `yaml:"name"`
+	KubeconfigPath string           `yaml:"kubeconfig_path"`
+	PodCIDR        string           `yaml:"pod_cidr"`
+	ServiceCIDR    string           `yaml:"service_cidr"`
+	Cilium         CiliumConfig     `yaml:"cilium"`
+	Monitoring     MonitoringConfig `yaml:"monitoring"`
+	Istio          IstioConfig      `yaml:"istio"`
+	NFS            NFSAddonConfig   `yaml:"nfs"`
+	K3s            K3sConfig        `yaml:"k3s"`
+	ControlPlane   []CPNode         `yaml:"control_plane"`
+	Workers        []WorkerNode     `yaml:"workers"`
 }
 
-// AddonsConfig lists optional software installed on every cluster after k3s is up.
-type AddonsConfig struct {
-	Cilium     CiliumAddon     `yaml:"cilium"`
-	Monitoring MonitoringAddon `yaml:"monitoring"`
+// CiliumConfig configures Cilium CNI installation per cluster.
+// Set enabled: true to install Cilium. Required for cluster_mesh participation.
+type CiliumConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Version string `yaml:"version"`
 }
 
-// CiliumAddon configures Cilium CNI installation and optional cluster mesh.
-type CiliumAddon struct {
-	Enabled     bool   `yaml:"enabled"`
-	Version     string `yaml:"version"`
-	ClusterMesh bool   `yaml:"cluster_mesh"`
-}
-
-// MonitoringAddon configures the kube-prometheus-stack installation.
-type MonitoringAddon struct {
+// MonitoringConfig configures the kube-prometheus-stack installation.
+// Set enabled: true to install the monitoring stack.
+type MonitoringConfig struct {
 	Enabled              bool   `yaml:"enabled"`
+	Version              string `yaml:"version"`
 	PrometheusNodePort   int    `yaml:"prometheus_node_port"`
 	GrafanaNodePort      int    `yaml:"grafana_node_port"`
 	GrafanaAdminPassword string `yaml:"grafana_admin_password"`
+}
+
+// IstioConfig configures Istio service mesh installation per cluster.
+// Set enabled: true to install Istio (base CRDs + istiod). Disabled by default.
+type IstioConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Version string `yaml:"version"`
+}
+
+// ClusterMeshEntry assigns a Cilium cluster ID to a named cluster that
+// participates in the cluster mesh.
+type ClusterMeshEntry struct {
+	Cluster string `yaml:"cluster"`
+	ID      int    `yaml:"id"`
+}
+
+// NFSConfig defines an optional NFS server VM that provides shared persistent
+// storage for all clusters. Each cluster gets its own subdirectory export.
+type NFSConfig struct {
+	VM           CPNode `yaml:"vm"`
+	DataDir      string `yaml:"data_dir"`
+	ExportSubnet string `yaml:"export_subnet"`
+}
+
+// NFSAddonConfig controls whether the NFS CSI driver is installed on a cluster.
+type NFSAddonConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Version string `yaml:"version"`
+}
+
+// RegistryConfig defines an optional Harbor VM that acts as a pull-through
+// cache for all clusters, reducing external bandwidth.
+type RegistryConfig struct {
+	VM     CPNode      `yaml:"vm"`
+	Harbor HarborConfig `yaml:"harbor"`
+}
+
+// HarborConfig holds Harbor-specific settings.
+type HarborConfig struct {
+	Hostname      string `yaml:"hostname"`
+	AdminPassword string `yaml:"admin_password"`
+	DataVolume    string `yaml:"data_volume"`
+	HTTPPort      int    `yaml:"http_port"`
 }
 
 type ProxmoxConfig struct {
@@ -92,9 +157,10 @@ type TemplateConfig struct {
 }
 
 type K3sConfig struct {
-	Version         string `yaml:"version"`
-	ExtraServerArgs string `yaml:"extra_server_args"`
-	ExtraAgentArgs  string `yaml:"extra_agent_args"`
+	Version           string `yaml:"version"`
+	ExtraServerArgs   string `yaml:"extra_server_args"`
+	ExtraAgentArgs    string `yaml:"extra_agent_args"`
+	TaintControlPlane *bool  `yaml:"taint_control_plane"`
 }
 
 type CPNode struct {
@@ -147,16 +213,33 @@ func Load(path string) (*Config, error) {
 // merging shared Proxmox credentials and template settings with the spec.
 func (c *Config) ToClusterConfig(spec ClusterSpec) *Config {
 	cfg := &Config{
-		ClusterName:    spec.ClusterName,
+		ClusterName:    spec.Name,
 		KubeconfigPath: spec.KubeconfigPath,
+		SSHKeyPath:     c.SSHKeyPath,
 		Proxmox:        c.Proxmox,
 		Template:       c.Template,
 		K3s:            spec.K3s,
+		PodCIDR:        spec.PodCIDR,
+		ServiceCIDR:    spec.ServiceCIDR,
 		ControlPlane:   spec.ControlPlane,
 		Workers:        spec.Workers,
+		// Note: Cilium, Monitoring, Istio are on ClusterSpec; callers use the spec directly.
 	}
 	cfg.applyDefaults()
 	return cfg
+}
+
+// SSHKeyFilePath returns the SSH private key path to use for all VMs.
+// It returns the configured path if set, otherwise ~/.proxmox-k3s/id_ed25519.
+func (c *Config) SSHKeyFilePath() (string, error) {
+	if c.SSHKeyPath != "" {
+		return c.SSHKeyPath, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".proxmox-k3s", "id_ed25519"), nil
 }
 
 func (c *Config) applyDefaults() {
@@ -165,7 +248,6 @@ func (c *Config) applyDefaults() {
 
 	// Template defaults (shared in both modes)
 	if c.Template.Name == "" {
-		// In multi-cluster mode ClusterName is empty; use a generic name.
 		baseName := c.ClusterName
 		if baseName == "" {
 			baseName = "k3s"
@@ -210,6 +292,11 @@ func (c *Config) applyDefaults() {
 		}
 	}
 
+	if c.K3s.TaintControlPlane == nil {
+		v := true
+		c.K3s.TaintControlPlane = &v
+	}
+
 	if c.IsMultiCluster() {
 		c.applyMultiDefaults()
 		return
@@ -231,38 +318,95 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) applyMultiDefaults() {
-	if c.Addons.Cilium.Enabled && c.Addons.Cilium.Version == "" {
-		c.Addons.Cilium.Version = "1.16.5"
+	const (
+		defaultCiliumVersion     = "1.19.3"
+		defaultMonitoringVersion = "84.5.0"
+		defaultIstioVersion      = "1.25.2"
+		defaultNFSCSIVersion     = "v4.9.0"
+		defaultNFSDataDir        = "/data/nfs"
+		defaultNFSExportSubnet   = "*"
+	)
+
+	if n := c.NFS; n != nil {
+		if n.VM.Name == "" {
+			n.VM.Name = "nfs-server"
+		}
+		applyNodeDefaults(&n.VM)
+		if n.VM.Cores == 0 {
+			n.VM.Cores = 2
+		}
+		if n.VM.Memory == 0 {
+			n.VM.Memory = 2048
+		}
+		if n.VM.DiskSize == 0 {
+			n.VM.DiskSize = 100
+		}
+		if n.DataDir == "" {
+			n.DataDir = defaultNFSDataDir
+		}
+		if n.ExportSubnet == "" {
+			n.ExportSubnet = defaultNFSExportSubnet
+		}
 	}
-	if c.Addons.Monitoring.Enabled {
-		if c.Addons.Monitoring.PrometheusNodePort == 0 {
-			c.Addons.Monitoring.PrometheusNodePort = 32090
+
+	if r := c.Registry; r != nil {
+		if r.VM.Name == "" {
+			r.VM.Name = "harbor"
 		}
-		if c.Addons.Monitoring.GrafanaNodePort == 0 {
-			c.Addons.Monitoring.GrafanaNodePort = 32000
+		applyNodeDefaults(&r.VM)
+		if r.VM.Cores == 0 {
+			r.VM.Cores = 2
 		}
-		if c.Addons.Monitoring.GrafanaAdminPassword == "" {
-			c.Addons.Monitoring.GrafanaAdminPassword = "admin"
+		if r.VM.Memory == 0 {
+			r.VM.Memory = 4096
+		}
+		if r.VM.DiskSize == 0 {
+			r.VM.DiskSize = 80
+		}
+		if r.Harbor.Hostname == "" {
+			r.Harbor.Hostname = r.VM.IP
+		}
+		if r.Harbor.AdminPassword == "" {
+			r.Harbor.AdminPassword = "Harbor12345"
+		}
+		if r.Harbor.DataVolume == "" {
+			r.Harbor.DataVolume = "/data"
+		}
+		if r.Harbor.HTTPPort == 0 {
+			r.Harbor.HTTPPort = 80
 		}
 	}
 
 	for i := range c.Clusters {
 		spec := &c.Clusters[i]
+		if spec.K3s.TaintControlPlane == nil {
+			v := true
+			spec.K3s.TaintControlPlane = &v
+		}
 		if spec.KubeconfigPath == "" {
-			spec.KubeconfigPath = fmt.Sprintf("./kubeconfig-%s", spec.ClusterName)
+			spec.KubeconfigPath = fmt.Sprintf("./kubeconfig-%s", spec.Name)
 		}
-		if spec.CiliumClusterID == 0 {
-			spec.CiliumClusterID = i + 1
+		if spec.Cilium.Enabled && spec.Cilium.Version == "" {
+			spec.Cilium.Version = defaultCiliumVersion
 		}
-		// When Cilium is the CNI, k3s must start without flannel.
-		if c.Addons.Cilium.Enabled {
-			const ciliumArgs = "--flannel-backend=none --disable-network-policy"
-			if !strings.Contains(spec.K3s.ExtraServerArgs, "--flannel-backend=none") {
-				if spec.K3s.ExtraServerArgs != "" {
-					spec.K3s.ExtraServerArgs += " " + ciliumArgs
-				} else {
-					spec.K3s.ExtraServerArgs = ciliumArgs
-				}
+		if spec.Monitoring.Enabled && spec.Monitoring.Version == "" {
+			spec.Monitoring.Version = defaultMonitoringVersion
+		}
+		if spec.Istio.Enabled && spec.Istio.Version == "" {
+			spec.Istio.Version = defaultIstioVersion
+		}
+		if spec.NFS.Enabled && spec.NFS.Version == "" {
+			spec.NFS.Version = defaultNFSCSIVersion
+		}
+		if spec.Monitoring.Enabled {
+			if spec.Monitoring.PrometheusNodePort == 0 {
+				spec.Monitoring.PrometheusNodePort = 32090
+			}
+			if spec.Monitoring.GrafanaNodePort == 0 {
+				spec.Monitoring.GrafanaNodePort = 32000
+			}
+			if spec.Monitoring.GrafanaAdminPassword == "" {
+				spec.Monitoring.GrafanaAdminPassword = "admin"
 			}
 		}
 		for j := range spec.ControlPlane {
@@ -327,36 +471,115 @@ func (c *Config) validateClusters() error {
 		return fmt.Errorf("template.timeout_seconds must be greater than 0")
 	}
 
-	usedNames := make(map[string]bool)
-	usedIDs := make(map[int]bool)
+	clusterNames := make(map[string]bool)
 	for i, spec := range c.Clusters {
-		if spec.ClusterName == "" {
-			return fmt.Errorf("clusters[%d].cluster_name is required", i)
+		if spec.Name == "" {
+			return fmt.Errorf("clusters[%d].name is required", i)
 		}
-		if usedNames[spec.ClusterName] {
-			return fmt.Errorf("duplicate cluster_name %q", spec.ClusterName)
+		if clusterNames[spec.Name] {
+			return fmt.Errorf("duplicate cluster name %q", spec.Name)
 		}
-		usedNames[spec.ClusterName] = true
+		clusterNames[spec.Name] = true
 
 		if len(spec.ControlPlane) != 1 && len(spec.ControlPlane) != 3 {
 			return fmt.Errorf("clusters[%d] (%s): control_plane must have 1 or 3 nodes, got %d",
-				i, spec.ClusterName, len(spec.ControlPlane))
+				i, spec.Name, len(spec.ControlPlane))
 		}
 		for j, node := range spec.ControlPlane {
 			if node.ProxmoxNode == "" {
 				return fmt.Errorf("clusters[%d] (%s): control_plane[%d].proxmox_node is required",
-					i, spec.ClusterName, j)
+					i, spec.Name, j)
 			}
-		}
-
-		if c.Addons.Cilium.Enabled && c.Addons.Cilium.ClusterMesh {
-			if usedIDs[spec.CiliumClusterID] {
-				return fmt.Errorf("duplicate cilium_cluster_id %d", spec.CiliumClusterID)
-			}
-			usedIDs[spec.CiliumClusterID] = true
 		}
 	}
+
+	if err := c.validateClusterMesh(clusterNames); err != nil {
+		return err
+	}
+
+	if r := c.Registry; r != nil {
+		if r.VM.ProxmoxNode == "" {
+			return fmt.Errorf("registry.vm.proxmox_node is required")
+		}
+		if r.Harbor.Hostname == "" {
+			return fmt.Errorf("registry.harbor.hostname is required when registry.vm.ip is not set")
+		}
+	}
+
+	if n := c.NFS; n != nil {
+		if n.VM.ProxmoxNode == "" {
+			return fmt.Errorf("nfs.vm.proxmox_node is required")
+		}
+		if n.VM.IP == "" {
+			return fmt.Errorf("nfs.vm.ip is required")
+		}
+	}
+
+	for i, spec := range c.Clusters {
+		if spec.NFS.Enabled && c.NFS == nil {
+			return fmt.Errorf("clusters[%d] (%s): nfs.enabled requires a top-level nfs: block", i, spec.Name)
+		}
+	}
+
 	return nil
+}
+
+func (c *Config) validateClusterMesh(clusterNames map[string]bool) error {
+	if len(c.ClusterMesh) == 0 {
+		return nil
+	}
+
+	usedIDs := make(map[int]bool)
+	meshClusters := make([]ClusterSpec, 0, len(c.ClusterMesh))
+
+	for i, entry := range c.ClusterMesh {
+		if !clusterNames[entry.Cluster] {
+			return fmt.Errorf("cluster_mesh[%d]: cluster %q is not defined in clusters", i, entry.Cluster)
+		}
+		if usedIDs[entry.ID] {
+			return fmt.Errorf("cluster_mesh: duplicate id %d", entry.ID)
+		}
+		usedIDs[entry.ID] = true
+
+		for _, spec := range c.Clusters {
+			if spec.Name == entry.Cluster {
+				if !spec.Cilium.Enabled {
+					return fmt.Errorf("cluster_mesh: cluster %q is in the mesh but has Cilium disabled", spec.Name)
+				}
+				meshClusters = append(meshClusters, spec)
+				break
+			}
+		}
+	}
+
+	// Verify no overlapping pod or service CIDRs among mesh clusters.
+	for i := 0; i < len(meshClusters); i++ {
+		for j := i + 1; j < len(meshClusters); j++ {
+			a, b := meshClusters[i], meshClusters[j]
+			if a.PodCIDR != "" && b.PodCIDR != "" && cidrsOverlap(a.PodCIDR, b.PodCIDR) {
+				return fmt.Errorf("cluster_mesh: pod_cidr overlap between %s (%s) and %s (%s)",
+					a.Name, a.PodCIDR, b.Name, b.PodCIDR)
+			}
+			if a.ServiceCIDR != "" && b.ServiceCIDR != "" && cidrsOverlap(a.ServiceCIDR, b.ServiceCIDR) {
+				return fmt.Errorf("cluster_mesh: service_cidr overlap between %s (%s) and %s (%s)",
+					a.Name, a.ServiceCIDR, b.Name, b.ServiceCIDR)
+			}
+		}
+	}
+
+	return nil
+}
+
+func cidrsOverlap(a, b string) bool {
+	_, netA, err := net.ParseCIDR(a)
+	if err != nil {
+		return false
+	}
+	_, netB, err := net.ParseCIDR(b)
+	if err != nil {
+		return false
+	}
+	return netA.Contains(netB.IP) || netB.Contains(netA.IP)
 }
 
 func StateDirForCluster(clusterName string) (string, error) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/unict-cclab/proxmox-k3s/internal/config"
 	"github.com/unict-cclab/proxmox-k3s/internal/ui"
@@ -18,40 +19,75 @@ const (
 )
 
 // InstallCilium installs Cilium via Helm and waits for it to be ready.
-// When addon.ClusterMesh is true the clustermesh-apiserver is also deployed on a NodePort.
-func InstallCilium(runner *util.Runner, addon config.CiliumAddon, clusterName string, clusterID int, out io.Writer) error {
+// When inMesh is true the clustermesh-apiserver is also deployed on a NodePort.
+func InstallCilium(runner *util.Runner, cilium config.CiliumConfig, clusterName, cpIP string, clusterID int, inMesh bool, out io.Writer) error {
 	ui.Step(out, "[%s] adding Cilium Helm repo...", clusterName)
-	if err := helmAddRepo(runner, "cilium", ciliumRepo); err != nil {
+	if err := helmAddRepo(runner, "cilium", ciliumRepo, out); err != nil {
 		return err
 	}
 
-	values := fmt.Sprintf(`cluster:
+	values := fmt.Sprintf(`kubeProxyReplacement: true
+k8sServiceHost: %s
+k8sServicePort: "6443"
+cluster:
   name: %s
   id: %d
 hubble:
   relay:
     enabled: true
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: nodepool
+              operator: In
+              values:
+              - management
+    tolerations:
+    - key: "nodepool"
+      operator: "Equal"
+      value: "management"
+      effect: "NoSchedule"
   ui:
     enabled: true
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: nodepool
+              operator: In
+              values:
+              - management
+    tolerations:
+    - key: "nodepool"
+      operator: "Equal"
+      value: "management"
+      effect: "NoSchedule"
 operator:
   replicas: 1
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: nodepool
+            operator: In
+            values:
+            - management
+  tolerations:
+  - operator: "Exists"
 ipam:
   mode: kubernetes
-`, clusterName, clusterID)
+`, cpIP, clusterName, clusterID)
 
-	if addon.ClusterMesh {
-		values += fmt.Sprintf(`clustermesh:
-  useAPIServer: true
-  apiserver:
-    service:
-      type: NodePort
-      nodePort: %d
-`, ciliumMeshNodePort)
-	}
-
-	ui.Step(out, "[%s] installing Cilium %s (cluster-id=%d)...", clusterName, addon.Version, clusterID)
-	chart := fmt.Sprintf("cilium/cilium --version %s", addon.Version)
-	if err := helmInstall(runner, ciliumRelease, chart, ciliumNamespace, values, out); err != nil {
+	ui.Step(out, "[%s] installing Cilium %s (cluster-id=%d)...", clusterName, cilium.Version, clusterID)
+	chart := fmt.Sprintf("cilium/cilium --version %s", cilium.Version)
+	if err := helmInstall(runner, ciliumRelease, chart, ciliumNamespace, values, "", out); err != nil {
 		return err
 	}
 
@@ -81,11 +117,24 @@ func EnableClusterMesh(runner *util.Runner, clusterName string, out io.Writer) e
 		return err
 	}
 
-	if err := runner.Run("cilium clustermesh enable --service-type NodePort", out); err != nil {
-		return fmt.Errorf("[%s] cilium clustermesh enable: %w", clusterName, err)
+	// The enable command can time out while certificate-generation jobs are
+	// still in progress on a fresh cluster. Retry a few times before giving up.
+	const enableRetries = 5
+	const enableRetryDelay = 30 * time.Second
+	for attempt := 1; attempt <= enableRetries; attempt++ {
+		err := runner.Run("cilium clustermesh enable --service-type NodePort", out)
+		if err == nil {
+			break
+		}
+		if attempt == enableRetries {
+			return fmt.Errorf("[%s] cilium clustermesh enable: %w", clusterName, err)
+		}
+		ui.Warn(out, "[%s] cilium clustermesh enable failed (attempt %d/%d), retrying in %s...",
+			clusterName, attempt, enableRetries, enableRetryDelay)
+		time.Sleep(enableRetryDelay)
 	}
 
-	if err := runner.Run("cilium clustermesh status --wait --wait-duration 5m", out); err != nil {
+	if err := runner.Run("cilium clustermesh status --wait --wait-duration 10m", out); err != nil {
 		return fmt.Errorf("[%s] cluster mesh not ready: %w", clusterName, err)
 	}
 
@@ -120,7 +169,7 @@ func ConnectClusterMesh(runner *util.Runner, sourceCluster string, sourceKubecon
 		ui.Step(out, "[%s] connecting to %s...", sourceCluster, destName)
 		// KUBECONFIG with both configs lets the cilium CLI resolve both contexts.
 		cmd := fmt.Sprintf(
-			"KUBECONFIG=%s:%s cilium clustermesh connect --context %s --destination-context %s",
+			"KUBECONFIG=%s:%s cilium clustermesh connect --context %s --destination-context %s --allow-mismatching-ca",
 			srcPath, destPath, sourceCluster, destName,
 		)
 		if err := runner.Run(cmd, out); err != nil {

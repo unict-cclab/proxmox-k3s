@@ -33,11 +33,12 @@ type NodeInfo struct {
 }
 
 type Installer struct {
-	cfg        *config.Config
-	keyPath    string
-	sshUser    string
-	k3sVersion string
-	out        io.Writer
+	cfg              *config.Config
+	keyPath          string
+	sshUser          string
+	k3sVersion       string
+	registryEndpoint string
+	out              io.Writer
 }
 
 func New(cfg *config.Config, keyPath string, out io.Writer) *Installer {
@@ -50,6 +51,17 @@ func New(cfg *config.Config, keyPath string, out io.Writer) *Installer {
 	}
 }
 
+// SetRegistryEndpoint configures a containerd mirror endpoint written to
+// /etc/rancher/k3s/registries.yaml on every node before k3s starts.
+func (i *Installer) SetRegistryEndpoint(endpoint string) {
+	i.registryEndpoint = endpoint
+}
+
+// nodeOut returns a writer that prefixes every output line with the node name.
+func (i *Installer) nodeOut(node *NodeInfo) io.Writer {
+	return util.NewPrefixWriter(node.Name, i.out)
+}
+
 func (i *Installer) ConnectNode(ip, name string) (*NodeInfo, error) {
 	ui.Step(i.out, "waiting for SSH on %s (%s)...", name, ip)
 	runner, err := util.WaitForSSH(ip, 22, i.sshUser, i.keyPath, sshBootTimeout)
@@ -60,22 +72,26 @@ func (i *Installer) ConnectNode(ip, name string) (*NodeInfo, error) {
 }
 
 func (i *Installer) InstallFirstServer(node *NodeInfo, ha bool) (token string, err error) {
-	ui.Step(i.out, "installing k3s server on %s...", node.Name)
-	if err := i.ensureServerRole(node); err != nil {
-		return "", err
-	}
-
-	if err := node.Runner.Run(i.installCommand("server", i.serverArgs(ha, "", "")), i.out); err != nil {
-		return "", fmt.Errorf("k3s install on %s: %w", node.Name, err)
-	}
-
-	ui.Step(i.out, "waiting for k3s to be ready on %s...", node.Name)
-	if err := i.waitForK3sReady(node.Runner); err != nil {
-		return "", err
-	}
-
-	if err := setupUserKubeconfig(node.Runner); err != nil {
-		return "", err
+	if i.k3sAlreadyInstalled(node.Runner) {
+		ui.Step(i.out, "k3s already at %s on %s, skipping reinstall", i.k3sVersion, node.Name)
+	} else {
+		ui.Step(i.out, "installing k3s server on %s...", node.Name)
+		if err := i.ensureServerRole(node); err != nil {
+			return "", err
+		}
+		if err := i.writeRegistriesConfig(node.Runner); err != nil {
+			return "", fmt.Errorf("writing registries config on %s: %w", node.Name, err)
+		}
+		if err := node.Runner.Run(i.installCommand("server", i.serverArgs(ha, "", "")), i.nodeOut(node)); err != nil {
+			return "", fmt.Errorf("k3s install on %s: %w", node.Name, err)
+		}
+		ui.Step(i.out, "waiting for k3s to be ready on %s...", node.Name)
+		if err := i.waitForK3sReady(node.Runner); err != nil {
+			return "", err
+		}
+		if err := setupUserKubeconfig(node.Runner); err != nil {
+			return "", err
+		}
 	}
 
 	token, err = i.waitForJoinToken(node)
@@ -90,20 +106,34 @@ func (i *Installer) InstallFirstServer(node *NodeInfo, ha bool) (token string, e
 }
 
 func (i *Installer) InstallAdditionalServer(node *NodeInfo, serverURL, token string) error {
+	if i.k3sAlreadyInstalled(node.Runner) {
+		ui.Step(i.out, "k3s already at %s on %s, skipping reinstall", i.k3sVersion, node.Name)
+		return nil
+	}
 	ui.Step(i.out, "joining server %s to cluster...", node.Name)
 	if err := i.ensureServerRole(node); err != nil {
 		return err
 	}
-	if err := node.Runner.Run(i.installCommand("server", i.serverArgs(false, serverURL, token)), i.out); err != nil {
+	if err := i.writeRegistriesConfig(node.Runner); err != nil {
+		return fmt.Errorf("writing registries config on %s: %w", node.Name, err)
+	}
+	if err := node.Runner.Run(i.installCommand("server", i.serverArgs(false, serverURL, token)), i.nodeOut(node)); err != nil {
 		return fmt.Errorf("k3s install on %s: %w", node.Name, err)
 	}
 	return i.waitForK3sReady(node.Runner)
 }
 
 func (i *Installer) InstallAgent(node *NodeInfo, serverURL, token string) error {
+	if i.k3sAlreadyInstalled(node.Runner) {
+		ui.Step(i.out, "k3s already at %s on %s, skipping reinstall", i.k3sVersion, node.Name)
+		return nil
+	}
 	ui.Step(i.out, "joining agent %s to cluster...", node.Name)
 	if err := i.ensureAgentRole(node); err != nil {
 		return err
+	}
+	if err := i.writeRegistriesConfig(node.Runner); err != nil {
+		return fmt.Errorf("writing registries config on %s: %w", node.Name, err)
 	}
 
 	args := []string{"K3S_URL=" + serverURL, "K3S_TOKEN=" + token}
@@ -111,7 +141,7 @@ func (i *Installer) InstallAgent(node *NodeInfo, serverURL, token string) error 
 		args = append(args, "INSTALL_K3S_EXEC="+i.cfg.K3s.ExtraAgentArgs)
 	}
 
-	if err := node.Runner.Run(i.installCommand("agent", args), i.out); err != nil {
+	if err := node.Runner.Run(i.installCommand("agent", args), i.nodeOut(node)); err != nil {
 		return fmt.Errorf("k3s agent install on %s: %w", node.Name, err)
 	}
 	return nil
@@ -148,15 +178,22 @@ func (i *Installer) FetchKubeconfig(node *NodeInfo, externalIP, clusterName stri
 		return "", fmt.Errorf("reading kubeconfig from %s: empty kubeconfig", node.Name)
 	}
 
+	kc := RewriteKubeconfig(raw, externalIP, clusterName)
+	if strings.TrimSpace(kc) == "" {
+		return "", fmt.Errorf("rewriting kubeconfig for %s produced empty output", node.Name)
+	}
+	return kc, nil
+}
+
+// RewriteKubeconfig replaces the localhost server address with externalIP and
+// renames all "default" identifiers to clusterName.
+func RewriteKubeconfig(raw, externalIP, clusterName string) string {
 	kc := strings.ReplaceAll(raw, "https://127.0.0.1:6443", "https://"+externalIP+":6443")
 	kc = strings.ReplaceAll(kc, "name: default", "name: "+clusterName)
 	kc = strings.ReplaceAll(kc, "cluster: default", "cluster: "+clusterName)
 	kc = strings.ReplaceAll(kc, "user: default", "user: "+clusterName)
 	kc = strings.ReplaceAll(kc, "current-context: default", "current-context: "+clusterName)
-	if strings.TrimSpace(kc) == "" {
-		return "", fmt.Errorf("rewriting kubeconfig for %s produced empty output", node.Name)
-	}
-	return kc, nil
+	return kc
 }
 
 func LatestK3sVersion(ctx context.Context) (string, error) {
@@ -220,6 +257,15 @@ func (i *Installer) serverArgs(clusterInit bool, serverURL, token string) []stri
 	}
 	if serverURL != "" {
 		execArgs = append(execArgs, "--server", serverURL)
+	}
+	if i.cfg.PodCIDR != "" {
+		execArgs = append(execArgs, "--cluster-cidr="+i.cfg.PodCIDR)
+	}
+	if i.cfg.ServiceCIDR != "" {
+		execArgs = append(execArgs, "--service-cidr="+i.cfg.ServiceCIDR)
+	}
+	if i.cfg.K3s.TaintControlPlane == nil || *i.cfg.K3s.TaintControlPlane {
+		execArgs = append(execArgs, "--node-taint node-role.kubernetes.io/control-plane:NoSchedule")
 	}
 	if i.cfg.K3s.ExtraServerArgs != "" {
 		execArgs = append(execArgs, i.cfg.K3s.ExtraServerArgs)
@@ -300,6 +346,14 @@ func setupUserKubeconfig(runner *util.Runner) error {
 	return nil
 }
 
+func (i *Installer) k3sAlreadyInstalled(runner *util.Runner) bool {
+	if i.k3sVersion == "" {
+		return false
+	}
+	v, err := runner.Output("k3s --version 2>/dev/null | awk '{print $3}'")
+	return err == nil && strings.TrimSpace(v) == i.k3sVersion
+}
+
 func (i *Installer) ensureServerRole(node *NodeInfo) error {
 	if _, err := node.Runner.Output(`if [ -x /usr/local/bin/k3s-agent-uninstall.sh ]; then sudo /usr/local/bin/k3s-agent-uninstall.sh; fi`); err != nil {
 		return fmt.Errorf("cleaning stale k3s-agent install on %s: %w", node.Name, err)
@@ -312,4 +366,47 @@ func (i *Installer) ensureAgentRole(node *NodeInfo) error {
 		return fmt.Errorf("cleaning stale k3s server install on %s: %w", node.Name, err)
 	}
 	return nil
+}
+
+func (i *Installer) writeRegistriesConfig(runner *util.Runner) error {
+	if i.registryEndpoint == "" {
+		return nil
+	}
+	content := fmt.Sprintf(`mirrors:
+  "docker.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "dockerhub-proxy/$1"
+  "registry.k8s.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "k8s-proxy/$1"
+  "ghcr.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "ghcr-proxy/$1"
+  "gcr.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "gcr-proxy/$1"
+  "quay.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "quay-proxy/$1"
+`,
+		i.registryEndpoint,
+		i.registryEndpoint,
+		i.registryEndpoint,
+		i.registryEndpoint,
+		i.registryEndpoint,
+	)
+	if err := runner.WriteFile("/tmp/registries.yaml", []byte(content)); err != nil {
+		return err
+	}
+	return runner.Run("sudo mkdir -p /etc/rancher/k3s && sudo mv /tmp/registries.yaml /etc/rancher/k3s/registries.yaml", io.Discard)
 }

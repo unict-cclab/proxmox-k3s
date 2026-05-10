@@ -14,8 +14,11 @@ import (
 )
 
 type Runner struct {
-	client *ssh.Client
-	host   string
+	client  *ssh.Client
+	host    string
+	port    int
+	user    string
+	keyPath string
 }
 
 func Dial(host string, port int, user, keyPath, password string) (*Runner, error) {
@@ -36,7 +39,19 @@ func Dial(host string, port int, user, keyPath, password string) (*Runner, error
 	if err != nil {
 		return nil, fmt.Errorf("SSH dial %s: %w", addr, err)
 	}
-	return &Runner{client: client, host: host}, nil
+	return &Runner{client: client, host: host, port: port, user: user, keyPath: keyPath}, nil
+}
+
+// Reconnect closes the current connection and opens a fresh one. Useful after
+// long-running remote commands that may have let the underlying TCP connection go stale.
+func (r *Runner) Reconnect() error {
+	r.client.Close()
+	fresh, err := Dial(r.host, r.port, r.user, r.keyPath, "")
+	if err != nil {
+		return err
+	}
+	r.client = fresh.client
+	return nil
 }
 
 func DialWithKey(host string, port int, user, keyPath string) (*Runner, error) {

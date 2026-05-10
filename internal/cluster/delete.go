@@ -13,24 +13,58 @@ import (
 )
 
 // Delete removes all clusters defined in the config.
-func Delete(ctx context.Context, cfg *config.Config, deleteTemplate bool, out io.Writer) error {
-	return deleteMulti(ctx, cfg, deleteTemplate, out)
+func Delete(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	return deleteMulti(ctx, cfg, out)
 }
 
-func deleteMulti(ctx context.Context, cfg *config.Config, deleteTemplate bool, out io.Writer) error {
-	last := len(cfg.Clusters) - 1
+// Teardown removes everything in reverse order: clusters → registry → template.
+// Errors are logged and execution continues so that a partially-broken environment
+// can still be fully cleaned up.
+func Teardown(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	if err := deleteMulti(ctx, cfg, out); err != nil {
+		ui.Warn(out, "error deleting clusters (continuing): %v", err)
+	}
 
-	for i, spec := range cfg.Clusters {
+	if cfg.Registry != nil {
+		fmt.Fprintln(out)
+		ui.Section(out, "=== Deleting registry ===")
+		if err := DeleteRegistry(ctx, cfg, out); err != nil {
+			ui.Warn(out, "error deleting registry (continuing): %v", err)
+		}
+	}
+
+	if cfg.NFS != nil {
+		fmt.Fprintln(out)
+		ui.Section(out, "=== Deleting NFS server ===")
+		if err := DeleteNFSServer(ctx, cfg, out); err != nil {
+			ui.Warn(out, "error deleting NFS server (continuing): %v", err)
+		}
+	}
+
+	px, err := pxclient.New(cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out)
+	ui.Section(out, "=== Deleting template ===")
+	if err := pxclient.DeleteTemplate(ctx, px, cfg, out); err != nil {
+		ui.Warn(out, "error deleting template (continuing): %v", err)
+	}
+
+	fmt.Fprintln(out)
+	ui.Success(out, "Teardown complete")
+	return nil
+}
+
+func deleteMulti(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	for _, spec := range cfg.Clusters {
 		clusterCfg := cfg.ToClusterConfig(spec)
 
 		fmt.Fprintln(out)
-		ui.Section(out, fmt.Sprintf("=== Deleting cluster: %s ===", spec.ClusterName))
+		ui.Section(out, fmt.Sprintf("=== Deleting cluster: %s ===", spec.Name))
 
-		// Delete the shared template only with the last cluster.
-		deleteThisTemplate := deleteTemplate && i == last
-
-		if err := deleteSingle(ctx, clusterCfg, deleteThisTemplate, out); err != nil {
-			ui.Warn(out, "error deleting %s: %v (continuing)", spec.ClusterName, err)
+		if err := deleteSingle(ctx, clusterCfg, out); err != nil {
+			ui.Warn(out, "error deleting %s: %v (continuing)", spec.Name, err)
 		}
 	}
 
@@ -39,7 +73,7 @@ func deleteMulti(ctx context.Context, cfg *config.Config, deleteTemplate bool, o
 	return nil
 }
 
-func deleteSingle(ctx context.Context, cfg *config.Config, deleteTemplate bool, out io.Writer) error {
+func deleteSingle(ctx context.Context, cfg *config.Config, out io.Writer) error {
 	px, err := pxclient.New(cfg)
 	if err != nil {
 		return err
@@ -66,13 +100,6 @@ func deleteSingle(ctx context.Context, cfg *config.Config, deleteTemplate bool, 
 	}
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("deleting VMs: %w", err)
-	}
-
-	if deleteTemplate {
-		ui.Section(out, "Deleting template")
-		if err := pxclient.DeleteTemplate(ctx, px, cfg, out); err != nil {
-			return err
-		}
 	}
 
 	fmt.Fprintln(out)

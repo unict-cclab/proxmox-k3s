@@ -1,49 +1,65 @@
-# proxmox-k3s cluster configuration
-# Only proxmox credentials and at least one cluster with a control_plane are required.
-# All other fields have defaults; commented-out fields are optional.
+# proxmox-k3s single-cluster configuration
+# Only proxmox credentials and a control_plane node are required.
+# All other fields have sensible defaults; commented-out fields are optional.
+# Run with: proxmox-k3s create -c cluster.yaml
+
+# ssh_key_path: ~/.ssh/id_ed25519   # path to the SSH private key injected into VMs
+#                                    # (default: ~/.proxmox-k3s/id_ed25519)
 
 proxmox:
-  api_url: https://192.168.1.10:8006/api2/json  # Proxmox API endpoint
-  token_id: root@pam!mytoken                     # API token ID, e.g. root@pam!mytoken
-  token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  # API token secret UUID
-  insecure_tls: true              # skip TLS verification for self-signed PVE certs (default: false)
+  api_url: https://192.168.1.10:8006/api2/json
+  token_id: root@pam!mytoken
+  token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  insecure_tls: true              # skip TLS verification for self-signed PVE certs
 
-# VM template built once and reused for all cluster VMs.
+# VM template — built once and cloned for every cluster VM.
 template:
-  # name: ubuntu-24.04-k3s-base  # template VM name (default: "k3s-tmpl"); set explicitly to share across clusters
-  proxmox_node: pve1              # PVE node where the template is built (default: first control_plane node)
-  storage: local-lvm              # storage for the template disk; must support "images" content type
-  # image_storage: local          # staging storage for the downloaded cloud image (default: same as storage)
-  os: ubuntu-24.04                # cloud image preset: ubuntu-24.04, ubuntu-22.04, debian-12
-  # cloud_image_url: https://...  # override: use a custom cloud image URL instead of the os preset
-  bridge: vmbr0                   # network bridge for the temporary template boot NIC
-  # ip: 192.168.1.90              # static IP for the template boot; omit for DHCP
+  # name: my-k3s-tmpl             # VM name (default: "<cluster-name>-tmpl")
+  proxmox_node: pve1
+  storage: local-lvm              # must support "images" content type
+  # image_storage: local          # staging storage for the cloud image download (default: same as storage)
+  os: ubuntu-24.04                # preset: ubuntu-24.04 | ubuntu-22.04 | debian-12
+  # cloud_image_url: https://...  # override the preset with a custom image URL
+  bridge: vmbr0
+  # ip: 192.168.1.90              # static IP for the template boot NIC; omit for DHCP
   # gateway: 192.168.1.1          # required when ip is set
-  # timeout_seconds: 1800         # timeout for image download + template conversion (default: 1800)
+  # timeout_seconds: 1800         # image download + conversion timeout (default: 1800)
 
 clusters:
-  - cluster_name: my-cluster      # prefix for all VM names and the kubeconfig context
-    kubeconfig_path: ./kubeconfig # where to write the kubeconfig after creation (default: ./kubeconfig-<cluster_name>)
+  - name: my-cluster              # prefix for all VM names and the kubeconfig context
+    kubeconfig_path: ./kubeconfig
+    pod_cidr: 10.42.0.0/16        # Cilium pod CIDR (avoid overlap with host network)
+    service_cidr: 10.43.0.0/16
+
     k3s:
-      version: v1.32.3+k3s1       # k3s version (default: latest stable)
-      extra_server_args: "--disable=traefik --disable=servicelb"
+      version: v1.32.3+k3s1       # omit to use the latest stable release
+      # Cilium requires these flags; include them whenever flannel is replaced.
+      extra_server_args: "--disable=traefik --disable=servicelb --flannel-backend=none --disable-network-policy"
       # extra_agent_args: ""
+
+    # cilium:
+    #   enabled: true             # install Cilium CNI (default: false)
+    #   version: "1.16.5"         # Cilium Helm chart version (default: 1.16.5)
+
+    # monitoring:
+    #   enabled: true             # install kube-prometheus-stack (default: false)
+    #   prometheus_node_port: 32090
+    #   grafana_node_port: 32000
+    #   grafana_admin_password: "admin"
 
     # Control plane: 1 node for standalone, 3 for HA with embedded etcd.
     control_plane:
-      - name: cp-01               # base VM name; cluster_name is automatically prefixed
-        proxmox_node: pve1        # PVE node to create the VM on (required)
-        storage: local-lvm        # VM disk storage (default: local-lvm)
-        bridge: vmbr0             # network bridge (default: vmbr0)
-        cores: 2                  # vCPU count (default: 2)
-        memory: 4096              # RAM in MB (default: 2048)
-        disk_size: 20             # disk size in GB (default: 20)
-        ip: 192.168.1.100         # static IP; omit for DHCP
-        gateway: 192.168.1.1      # required when ip is set
-        dns: 1.1.1.1              # DNS server (default: 1.1.1.1)
-        subnet_mask: 24           # CIDR prefix length (default: 24)
+      - name: cp-01
+        proxmox_node: pve1
+        cores: 2
+        memory: 4096
+        disk_size: 20
+        ip: 192.168.1.100
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
 
-      # Uncomment for HA (3 nodes total):
+      # Uncomment for HA (3 nodes required):
       # - name: cp-02
       #   proxmox_node: pve2
       #   cores: 2
@@ -52,7 +68,6 @@ clusters:
       #   ip: 192.168.1.101
       #   gateway: 192.168.1.1
       #   subnet_mask: 24
-
       # - name: cp-03
       #   proxmox_node: pve3
       #   cores: 2
@@ -73,11 +88,11 @@ clusters:
         dns: 1.1.1.1
         subnet_mask: 24
         labels:
-          - "nodepool=workers"    # Kubernetes node labels applied after join
-        taints: []                # e.g. "key=value:NoSchedule"
+          - "nodepool=workers"
+        taints: []
 
       - name: worker-02
-        proxmox_node: pve2
+        proxmox_node: pve1
         cores: 4
         memory: 4096
         disk_size: 40

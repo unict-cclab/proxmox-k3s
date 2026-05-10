@@ -88,6 +88,7 @@ func EnsureTemplate(ctx context.Context, c *Client, cfg *config.Config, sshKeyPa
 		"sshkeys":    encodeSSHKey(sshPubKey),
 		"ipconfig0":  buildTemplateIPConfig(cfg.Template),
 		"nameserver": cfg.Template.DNS,
+		"ciupgrade":  "0",
 	}
 	if cfg.Template.Password != "" {
 		ciConfig["cipassword"] = cfg.Template.Password

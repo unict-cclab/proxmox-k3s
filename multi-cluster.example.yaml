@@ -1,44 +1,48 @@
 # proxmox-k3s multi-cluster configuration
-# Provisions multiple k3s clusters and connects them via Cilium cluster mesh.
+# Provisions multiple k3s clusters in parallel and connects them via Cilium cluster mesh.
 # Run with: proxmox-k3s create -c multi-cluster.yaml
 
-# Shared Proxmox credentials used by every cluster.
+# ssh_key_path: ~/.ssh/id_ed25519   # path to the SSH private key injected into VMs
+#                                    # (default: ~/.proxmox-k3s/id_ed25519)
+
 proxmox:
   api_url: https://192.168.1.10:8006/api2/json
   token_id: root@pam!mytoken
   token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-  insecure_tls: true            # accept self-signed PVE certs (common in homelabs)
+  insecure_tls: true
 
 # Shared VM template — built once and cloned for all clusters.
 template:
-  proxmox_node: pve1            # node where the template is built
-  storage: local-lvm            # must support "images" content type
+  proxmox_node: pve1
+  storage: local-lvm
   os: ubuntu-24.04
   bridge: vmbr0
 
-# Add-ons installed on every cluster after k3s is up.
-addons:
-  cilium:
-    enabled: true
-    version: "1.16.5"           # Cilium Helm chart version
-    cluster_mesh: true          # connect all clusters into a single mesh
-  monitoring:
-    enabled: true
-    prometheus_node_port: 32090 # NodePort for Prometheus
-    grafana_node_port: 32000    # NodePort for Grafana
-    grafana_admin_password: "admin"
-
-# Per-cluster definitions.
-# Each cluster gets a unique cilium_cluster_id (1-255) required for the mesh.
-# When cilium.enabled is true, --flannel-backend=none and --disable-network-policy
-# are automatically appended to k3s extra_server_args.
+# Per-cluster definitions. Clusters are created in parallel.
 clusters:
-  - cluster_name: cluster-01
-    cilium_cluster_id: 1        # must be unique across all clusters
+  - name: cluster-01
     kubeconfig_path: ./kubeconfig-cluster-01
+    pod_cidr: 10.42.0.0/16       # must be unique across all mesh clusters
+    service_cidr: 10.43.0.0/16   # must be unique across all mesh clusters
     k3s:
       version: v1.32.3+k3s1
-      extra_server_args: "--disable=traefik --disable=servicelb"
+      extra_server_args: "--disable=traefik --disable=servicelb --flannel-backend=none --disable-network-policy --disable-kube-proxy"
+      # taint_control_plane: false   # set to false to allow workloads on CP nodes (default: true)
+    cilium:
+      enabled: true               # required for cluster_mesh
+      # version: "1.19.3"         # Cilium Helm chart version (default: 1.19.3)
+    monitoring:
+      enabled: true
+      # version: "84.5.0"          # kube-prometheus-stack Helm chart version (default: 84.5.0)
+      # prometheus_node_port: 32090
+      # grafana_node_port: 32000
+      # grafana_admin_password: "admin"
+    # istio:
+    #   enabled: false             # set to true to install Istio (base + istiod)
+    #   version: "1.25.2"          # Istio Helm chart version (default: 1.25.2)
+    # nfs:
+    #   enabled: false             # set to true to install the NFS CSI driver (requires top-level nfs: block)
+    #   version: "v4.9.0"          # csi-driver-nfs Helm chart version (default: v4.9.0)
     control_plane:
       - name: cp-01
         proxmox_node: pve1
@@ -63,12 +67,18 @@ clusters:
           - "nodepool=workers"
         taints: []
 
-  - cluster_name: cluster-02
-    cilium_cluster_id: 2
+  - name: cluster-02
     kubeconfig_path: ./kubeconfig-cluster-02
+    pod_cidr: 10.44.0.0/16
+    service_cidr: 10.45.0.0/16
     k3s:
       version: v1.32.3+k3s1
-      extra_server_args: "--disable=traefik --disable=servicelb"
+      extra_server_args: "--disable=traefik --disable=servicelb --flannel-backend=none --disable-network-policy --disable-kube-proxy"
+    monitoring:
+      enabled: true
+      # prometheus_node_port: 32090
+      # grafana_node_port: 32000
+      # grafana_admin_password: "admin"
     control_plane:
       - name: cp-01
         proxmox_node: pve2
@@ -92,3 +102,52 @@ clusters:
         labels:
           - "nodepool=workers"
         taints: []
+
+# Assigns a Cilium cluster ID (1–255) to each cluster that joins the mesh.
+# IDs must be unique. pod_cidr and service_cidr must not overlap across mesh clusters.
+# Omit this section entirely to skip mesh setup.
+cluster_mesh:
+  - cluster: cluster-01
+    id: 1
+  - cluster: cluster-02
+    id: 2
+
+# Optional: Harbor pull-through cache registry.
+# Provision it once with: proxmox-k3s registry create -c multi-cluster.yaml
+# All clusters will pull images through it; external bandwidth is used only on first pull.
+# Omit this section entirely to pull images directly from the internet.
+# registry:
+#   vm:
+#     name: harbor
+#     proxmox_node: pve1
+#     cores: 4
+#     memory: 8192
+#     disk_size: 80
+#     ip: 192.168.1.50
+#     gateway: 192.168.1.1
+#     dns: 1.1.1.1
+#     subnet_mask: 24
+#   harbor:
+#     hostname: 192.168.1.50       # defaults to vm.ip when omitted
+#     admin_password: Harbor12345
+#     data_volume: /data
+#     http_port: 80
+
+# Optional: NFS server for shared persistent storage across clusters.
+# Provision it once with: proxmox-k3s nfs create -c multi-cluster.yaml
+# Each cluster gets its own export: <data_dir>/<cluster-name>
+# Enable the NFS CSI driver per cluster with nfs.enabled: true
+# Omit this section entirely if you don't need shared storage.
+# nfs:
+#   vm:
+#     name: nfs-server
+#     proxmox_node: pve1
+#     cores: 2
+#     memory: 2048
+#     disk_size: 100             # data disk size in GB
+#     ip: 192.168.1.51
+#     gateway: 192.168.1.1
+#     dns: 1.1.1.1
+#     subnet_mask: 24
+#   data_dir: /data/nfs          # base directory; each cluster gets a subdirectory
+#   export_subnet: "*"           # who can mount (default: all hosts)

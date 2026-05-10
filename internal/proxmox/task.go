@@ -2,6 +2,7 @@ package proxmox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,7 +29,7 @@ func waitForTaskOK(ctx context.Context, task *pxapi.Task, seconds int) error {
 	if log, err := task.Log(ctx, 0, 50); err == nil && len(log) > 0 {
 		msg = taskLogSummary(log)
 	}
-	return fmt.Errorf("%s", msg)
+	return errors.New(msg)
 }
 
 func taskLogSummary(log pxapi.Log) string {
