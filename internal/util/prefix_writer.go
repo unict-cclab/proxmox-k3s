@@ -8,7 +8,7 @@ import (
 )
 
 // PrefixWriter wraps an io.Writer and prepends "[prefix] " to every complete
-// line. It is safe for concurrent use: the internal mutex serialises both the
+// line. It is safe for concurrent use: the internal mutex serializes both the
 // partial-line buffer and the final write to the underlying writer, so output
 // from multiple goroutines writing to the same PrefixWriter does not interleave.
 type PrefixWriter struct {

@@ -128,7 +128,7 @@ func ConfigureNFSExportForCluster(nfsServer, dataDir, exportSubnet, clusterName,
 		return fmt.Errorf("adding NFS export for %s: %w", clusterName, err)
 	}
 
-	if err := runner.Run("sudo exportfs -rav", out); err != nil {
+	if err := runner.Run("sudo exportfs -rav", out); err != nil { //nolint:misspell
 		return fmt.Errorf("reloading NFS exports: %w", err)
 	}
 	return nil
@@ -166,7 +166,7 @@ func configureNFSExports(runner *util.Runner, n *config.NFSConfig, clusters []co
 		return fmt.Errorf("installing /etc/exports: %w", err)
 	}
 
-	if err := runner.Run("sudo exportfs -rav && sudo systemctl enable --now nfs-kernel-server", out); err != nil {
+	if err := runner.Run("sudo exportfs -rav && sudo systemctl enable --now nfs-kernel-server", out); err != nil { //nolint:misspell
 		return fmt.Errorf("reloading NFS exports: %w", err)
 	}
 	return nil

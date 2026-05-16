@@ -739,7 +739,7 @@ func installControlPlane(installer *k3s.Installer, cfg *config.Config, cpVMs []*
 }
 
 func installWorkers(ctx context.Context, installer *k3s.Installer, serverURL, token string, workerVMs []*pxclient.VMInfo) error {
-	g, ctx := errgroup.WithContext(ctx)
+	g, _ := errgroup.WithContext(ctx)
 	for _, vm := range workerVMs {
 		vm := vm
 		g.Go(func() error {
