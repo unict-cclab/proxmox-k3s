@@ -1,87 +1,169 @@
-# proxmox-k3s single-cluster configuration
-# Only proxmox credentials and a control_plane node are required.
-# All other fields have sensible defaults; commented-out fields are optional.
-# Run with: proxmox-k3s create -c cluster.yaml
+# cluster.example.yaml — reference config with all available options
+# Copy to cluster.yaml (the default config path) and fill in your values.
+#
+# The two-file split (shared.yaml + clusters.yaml) is optional.
+# You can keep everything in a single file and run:
+#
+#   proxmox-k3s setup-all    # provisions template, registry, nfs, then all clusters
+#   proxmox-k3s delete-all   # tears everything down
+#
+# Or target individual resources:
+#   proxmox-k3s template create  / delete
+#   proxmox-k3s registry create  / delete
+#   proxmox-k3s nfs      create  / delete
+#   proxmox-k3s cluster  create  / delete  / kubeconfig  / mesh
 
-# ssh_key_path: ~/.ssh/id_ed25519   # path to the SSH private key injected into VMs
-#                                    # (default: ~/.proxmox-k3s/id_ed25519)
-
+# ---------------------------------------------------------------------------
+# Proxmox API credentials (required)
+# ---------------------------------------------------------------------------
 proxmox:
   api_url: https://192.168.1.10:8006/api2/json
   token_id: root@pam!mytoken
   token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-  insecure_tls: true              # skip TLS verification for self-signed PVE certs
+  insecure_tls: true              # set false in production with a valid TLS cert
 
-# VM template — built once and cloned for every cluster VM.
+# ---------------------------------------------------------------------------
+# SSH key (optional)
+# Auto-generated at ~/.proxmox-k3s/id_ed25519 if omitted.
+# ---------------------------------------------------------------------------
+# ssh_key_path: ~/.proxmox-k3s/id_ed25519
+
+# ---------------------------------------------------------------------------
+# VM template (required for cluster creation)
+# Omit this block entirely if using a pre-existing template.
+# ---------------------------------------------------------------------------
 template:
-  # name: my-k3s-tmpl             # VM name (default: "<cluster-name>-tmpl")
-  proxmox_node: pve1
-  storage: local-lvm              # must support "images" content type
-  # image_storage: local          # staging storage for the cloud image download (default: same as storage)
-  os: ubuntu-24.04                # preset: ubuntu-24.04 | ubuntu-22.04 | debian-12
-  # cloud_image_url: https://...  # override the preset with a custom image URL
+  name: ubuntu-24.04-template   # VM name in Proxmox
+  proxmox_node: pve             # Proxmox node to build the template on
+  storage: local-lvm            # VM disk storage — must support "images" content type
+  image_storage: local          # staging storage for the cloud image download — must support "import"
+  os: ubuntu-24.04              # one of: ubuntu-24.04, ubuntu-22.04, debian-12
+  # cloud_image_url:            # override to use a custom image URL
   bridge: vmbr0
-  # ip: 192.168.1.90              # static IP for the template boot NIC; omit for DHCP
-  # gateway: 192.168.1.1          # required when ip is set
-  # timeout_seconds: 1800         # image download + conversion timeout (default: 1800)
+  disk_size: 10                 # GB; default 10
+  ip: 192.168.1.49              # static IP for the one-time template boot; omit for DHCP
+  gateway: 192.168.1.1
+  dns: 1.1.1.1
+  subnet_mask: 24
+  # password:                   # optional cloud-init password (SSH key auth is always enabled)
+  # vmid_base: 8000             # first VMID to try when allocating the template VM
+  # timeout_seconds: 1800       # max seconds to wait for template operations
 
+# ---------------------------------------------------------------------------
+# Harbor registry VM (optional)
+# Provides a pull-through cache for docker.io, ghcr.io, gcr.io, etc.
+# ---------------------------------------------------------------------------
+registry:
+  vm:
+    name: harbor
+    proxmox_node: pve
+    cores: 4
+    memory: 8192
+    disk_size: 80
+    ip: 192.168.1.50
+    gateway: 192.168.1.1
+    dns: 1.1.1.1
+    subnet_mask: 24
+  harbor:
+    hostname: 192.168.1.50      # used by clusters to configure containerd mirrors
+    admin_password: Harbor12345
+    data_volume: /data
+    http_port: 80
+
+# ---------------------------------------------------------------------------
+# NFS server VM (optional)
+# Provides a shared RWX storage backend for all clusters via the NFS CSI driver.
+# Each cluster gets its own subdirectory under data_dir.
+# ---------------------------------------------------------------------------
+nfs:
+  vm:
+    name: nfs-server
+    proxmox_node: pve
+    cores: 2
+    memory: 2048
+    disk_size: 100              # data disk size in GB
+    ip: 192.168.1.51
+    gateway: 192.168.1.1
+    dns: 1.1.1.1
+    subnet_mask: 24
+  data_dir: /data/nfs           # base export path on the NFS server
+  export_subnet: "192.168.1.0/24"  # who can mount (use "*" to allow all)
+
+# ---------------------------------------------------------------------------
+# Clusters
+# ---------------------------------------------------------------------------
 clusters:
-  - name: my-cluster              # prefix for all VM names and the kubeconfig context
-    kubeconfig_path: ./kubeconfig
-    pod_cidr: 10.42.0.0/16        # Cilium pod CIDR (avoid overlap with host network)
+  # --- Cluster with Cilium CNI and cluster mesh ---
+  - name: cluster-01
+    kubeconfig_path: ./kubeconfig-cluster-01
+    pod_cidr: 10.42.0.0/16     # must be unique across all mesh clusters
     service_cidr: 10.43.0.0/16
 
     k3s:
-      version: v1.32.3+k3s1       # omit to use the latest stable release
-      # Cilium requires these flags; include them whenever flannel is replaced.
-      extra_server_args: "--disable=traefik --disable=servicelb --flannel-backend=none --disable-network-policy"
+      version: v1.32.3+k3s1
+      # When using Cilium: disable flannel, network policy, and kube-proxy
+      extra_server_args: "--disable=traefik --disable=servicelb --flannel-backend=none --disable-network-policy --disable-kube-proxy"
       # extra_agent_args: ""
+      # taint_control_plane: true   # default true; set false to schedule workloads on CP nodes
 
-    # cilium:
-    #   enabled: true             # install Cilium CNI (default: false)
-    #   version: "1.16.5"         # Cilium Helm chart version (default: 1.16.5)
+    addons:
+      # Cilium CNI — required for cluster mesh participation
+      cilium:
+        enabled: true
+        # version: "1.19.4"         # omit to use the built-in default
+        hubble_ui_node_port: 32080  # 0 to disable Hubble UI NodePort
 
-    # monitoring:
-    #   enabled: true             # install kube-prometheus-stack (default: false)
-    #   prometheus_node_port: 32090
-    #   grafana_node_port: 32000
-    #   grafana_admin_password: "admin"
+      # kube-prometheus-stack (Prometheus + Grafana)
+      monitoring:
+        enabled: true
+        # version: "84.5.0"
+        prometheus_node_port: 32090
+        grafana_node_port: 32000
+        grafana_admin_password: "admin"
 
-    # Control plane: 1 node for standalone, 3 for HA with embedded etcd.
+      # Istio service mesh — mutually exclusive with Cilium in most setups;
+      # enable on clusters that use flannel instead
+      # istio:
+      #   enabled: false
+      #   # version: "1.25.2"
+      #   # gateway_api_version: "v1.3.0"  # omit to auto-resolve latest stable
+
+      # Pull-through registry — references a pre-existing Harbor instance
+      registry:
+        hostname: 192.168.1.50
+        http_port: 80
+
+      # NFS CSI driver — references a pre-existing NFS server
+      nfs:
+        enabled: true
+        # version: "v4.9.0"
+        server: 192.168.1.51
+        data_dir: /data/nfs
+        # export_subnet: "*"
+
     control_plane:
       - name: cp-01
-        proxmox_node: pve1
-        cores: 2
-        memory: 4096
-        disk_size: 20
+        template: ubuntu-24.04-template
+        proxmox_node: pve
+        cores: 4
+        memory: 8192
+        disk_size: 40
         ip: 192.168.1.100
         gateway: 192.168.1.1
         dns: 1.1.1.1
         subnet_mask: 24
-
-      # Uncomment for HA (3 nodes required):
+      # Add two more nodes for HA (total must be 1 or 3):
       # - name: cp-02
-      #   proxmox_node: pve2
-      #   cores: 2
-      #   memory: 4096
-      #   disk_size: 20
-      #   ip: 192.168.1.101
-      #   gateway: 192.168.1.1
-      #   subnet_mask: 24
+      #   ...
       # - name: cp-03
-      #   proxmox_node: pve3
-      #   cores: 2
-      #   memory: 4096
-      #   disk_size: 20
-      #   ip: 192.168.1.102
-      #   gateway: 192.168.1.1
-      #   subnet_mask: 24
+      #   ...
 
     workers:
       - name: worker-01
-        proxmox_node: pve1
+        template: ubuntu-24.04-template
+        proxmox_node: pve
         cores: 4
-        memory: 4096
+        memory: 8192
         disk_size: 40
         ip: 192.168.1.110
         gateway: 192.168.1.1
@@ -91,15 +173,71 @@ clusters:
           - "nodepool=workers"
         taints: []
 
-      - name: worker-02
-        proxmox_node: pve1
+  # --- Cluster with Istio and flannel CNI ---
+  - name: cluster-02
+    kubeconfig_path: ./kubeconfig-cluster-02
+    pod_cidr: 10.52.0.0/16
+    service_cidr: 10.53.0.0/16
+
+    k3s:
+      version: v1.32.3+k3s1
+      # Using flannel (no --flannel-backend=none); disable traefik and servicelb only
+      extra_server_args: "--disable=traefik --disable=servicelb"
+
+    addons:
+      monitoring:
+        enabled: true
+        # version: "84.5.0"
+        prometheus_node_port: 32090
+        grafana_node_port: 32000
+        grafana_admin_password: "admin"
+
+      istio:
+        enabled: true
+        # version: "1.25.2"
+        # gateway_api_version: "v1.3.0"
+
+      registry:
+        hostname: 192.168.1.50
+        http_port: 80
+
+      nfs:
+        enabled: true
+        server: 192.168.1.51
+        data_dir: /data/nfs
+
+    control_plane:
+      - name: cp-01
+        template: ubuntu-24.04-template
+        proxmox_node: pve
         cores: 4
-        memory: 4096
+        memory: 8192
         disk_size: 40
-        ip: 192.168.1.111
+        ip: 192.168.1.200
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
+
+    workers:
+      - name: worker-01
+        template: ubuntu-24.04-template
+        proxmox_node: pve
+        cores: 4
+        memory: 8192
+        disk_size: 40
+        ip: 192.168.1.210
         gateway: 192.168.1.1
         dns: 1.1.1.1
         subnet_mask: 24
         labels:
           - "nodepool=workers"
-        taints: []
+
+# ---------------------------------------------------------------------------
+# Cilium cluster mesh (optional)
+# Only clusters with cilium.enabled: true can participate.
+# IDs must be unique, in range 1–255.
+# ---------------------------------------------------------------------------
+cluster_mesh:
+  - cluster: cluster-01
+    id: 1
+# cluster-02 uses flannel, so it cannot join the mesh

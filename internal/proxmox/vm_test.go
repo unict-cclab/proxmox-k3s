@@ -1,4 +1,4 @@
-﻿package proxmox
+package proxmox
 
 import (
 	"bytes"

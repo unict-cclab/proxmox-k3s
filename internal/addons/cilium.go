@@ -18,15 +18,9 @@ const (
 	ciliumMeshNodePort = 32379
 )
 
-// InstallCilium installs Cilium via Helm and waits for it to be ready.
-// When inMesh is true the clustermesh-apiserver is also deployed on a NodePort.
-func InstallCilium(runner *util.Runner, cilium config.CiliumConfig, clusterName, cpIP string, clusterID int, inMesh bool, out io.Writer) error {
-	ui.Step(out, "[%s] adding Cilium Helm repo...", clusterName)
-	if err := helmAddRepo(runner, "cilium", ciliumRepo, out); err != nil {
-		return err
-	}
-
-	values := fmt.Sprintf(`kubeProxyReplacement: true
+// ciliumValuesTemplate is the Helm values template for Cilium.
+// Format args: cpIP, clusterName, clusterID (int), hubbleUIServiceBlock.
+const ciliumValuesTemplate = `kubeProxyReplacement: true
 k8sServiceHost: %s
 k8sServicePort: "6443"
 cluster:
@@ -52,7 +46,7 @@ hubble:
       effect: "NoSchedule"
   ui:
     enabled: true
-    affinity:
+%s    affinity:
       nodeAffinity:
         preferredDuringSchedulingIgnoredDuringExecution:
         - weight: 100
@@ -83,7 +77,26 @@ operator:
   - operator: "Exists"
 ipam:
   mode: kubernetes
-`, cpIP, clusterName, clusterID)
+`
+
+// ciliumHubbleUIServiceBlock is injected into ciliumValuesTemplate when HubbleUINodePort > 0.
+// Format arg: nodePort (int).
+const ciliumHubbleUIServiceBlock = "    service:\n      type: NodePort\n      nodePort: %d\n"
+
+// InstallCilium installs Cilium via Helm and waits for it to be ready.
+// When inMesh is true the clustermesh-apiserver is also deployed on a NodePort.
+func InstallCilium(runner *util.Runner, cilium config.CiliumConfig, clusterName, cpIP string, clusterID int, inMesh bool, out io.Writer) error {
+	ui.Step(out, "[%s] adding Cilium Helm repo...", clusterName)
+	if err := helmAddRepo(runner, "cilium", ciliumRepo, out); err != nil {
+		return err
+	}
+
+	hubbleUIServiceBlock := ""
+	if cilium.HubbleUINodePort > 0 {
+		hubbleUIServiceBlock = fmt.Sprintf(ciliumHubbleUIServiceBlock, cilium.HubbleUINodePort)
+	}
+
+	values := fmt.Sprintf(ciliumValuesTemplate, cpIP, clusterName, clusterID, hubbleUIServiceBlock)
 
 	ui.Step(out, "[%s] installing Cilium %s (cluster-id=%d)...", clusterName, cilium.Version, clusterID)
 	chart := fmt.Sprintf("cilium/cilium --version %s", cilium.Version)

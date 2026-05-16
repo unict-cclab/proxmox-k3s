@@ -1,4 +1,4 @@
-﻿package proxmox
+package proxmox
 
 import (
 	"context"
@@ -15,7 +15,6 @@ import (
 	"github.com/unict-cclab/proxmox-k3s/internal/util"
 )
 
-const templateSSHUser = "ubuntu"
 
 func TemplateName(cfg *config.Config) string {
 	return cfg.Template.Name
@@ -84,7 +83,7 @@ func EnsureTemplate(ctx context.Context, c *Client, cfg *config.Config, sshKeyPa
 
 	ui.Step(out, "[template] configuring first-boot cloud-init...")
 	ciConfig := map[string]string{
-		"ciuser":     templateSSHUser,
+		"ciuser":     config.VMSSHUser,
 		"sshkeys":    encodeSSHKey(sshPubKey),
 		"ipconfig0":  buildTemplateIPConfig(cfg.Template),
 		"nameserver": cfg.Template.DNS,
@@ -154,7 +153,7 @@ func prepareTemplateGuest(ctx context.Context, vm *pxapi.VirtualMachine, tmpl co
 	ui.Info(out, "[template] guest reachable at %s", ip)
 
 	ui.Step(out, "[template] waiting for SSH...")
-	runner, err := util.WaitForSSH(ip, 22, templateSSHUser, sshKeyPath, time.Duration(tmpl.TimeoutSeconds)*time.Second)
+	runner, err := util.WaitForSSH(ip, 22, config.VMSSHUser, sshKeyPath, time.Duration(tmpl.TimeoutSeconds)*time.Second)
 	if err != nil {
 		return fmt.Errorf("SSH to template VM: %w", err)
 	}
@@ -165,8 +164,8 @@ func prepareTemplateGuest(ctx context.Context, vm *pxapi.VirtualMachine, tmpl co
 		return fmt.Errorf("waiting for cloud-init in template VM: %w", err)
 	}
 
-	ui.Step(out, "[template] upgrading packages...")
-	if err := runner.Run("sudo env DEBIAN_FRONTEND=noninteractive apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y autoremove && sudo apt-get clean", out); err != nil {
+	ui.Step(out, "[template] upgrading packages and installing qemu-guest-agent...")
+	if err := runner.Run("sudo env DEBIAN_FRONTEND=noninteractive apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y install qemu-guest-agent && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y autoremove && sudo apt-get clean", out); err != nil {
 		return fmt.Errorf("updating packages in template VM: %w", err)
 	}
 

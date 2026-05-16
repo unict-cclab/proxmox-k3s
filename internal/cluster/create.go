@@ -29,7 +29,6 @@ type clusterState struct {
 	keyPath    string
 }
 
-
 // Setup provisions everything end-to-end:
 // template → registry → clusters → mesh.
 // Use this when starting from scratch.
@@ -38,32 +37,36 @@ func Setup(ctx context.Context, cfg *config.Config, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("SSH key path: %w", err)
 	}
-	keyPair, err := util.EnsureKeyPairAt(keyPath)
-	if err != nil {
-		return fmt.Errorf("SSH key pair: %w", err)
-	}
 
 	px, err := pxclient.New(cfg)
 	if err != nil {
 		return err
 	}
 
-	ui.Section(out, "VM template")
-	if err := pxclient.EnsureTemplate(ctx, px, cfg, keyPair.PrivateKeyPath, keyPair.PublicKey, out); err != nil {
-		return err
+	if cfg.HasTemplateConfig() {
+		keyPair, err := util.EnsureKeyPairAt(keyPath)
+		if err != nil {
+			return fmt.Errorf("SSH key pair: %w", err)
+		}
+		ui.Section(out, "VM template")
+		if err := pxclient.EnsureTemplate(ctx, px, cfg, keyPair.PrivateKeyPath, keyPair.PublicKey, out); err != nil {
+			return err
+		}
+	} else {
+		ui.Step(out, "verifying templates exist...")
+		if err := checkTemplatesExist(ctx, px, cfg); err != nil {
+			return err
+		}
 	}
 
 	if err := resolveK3sVersions(ctx, cfg, out); err != nil {
 		return err
 	}
 
-	var registryEndpoint string
 	if cfg.Registry != nil {
-		endpoint, err := CreateRegistry(ctx, cfg, out)
-		if err != nil {
+		if _, err := CreateRegistry(ctx, cfg, out); err != nil {
 			return err
 		}
-		registryEndpoint = endpoint
 	}
 
 	if cfg.NFS != nil {
@@ -72,7 +75,7 @@ func Setup(ctx context.Context, cfg *config.Config, out io.Writer) error {
 		}
 	}
 
-	states, err := provisionClusters(ctx, cfg, px, keyPath, registryEndpoint, out)
+	states, err := provisionClusters(ctx, cfg, px, keyPath, out)
 	if err != nil {
 		return err
 	}
@@ -97,17 +100,19 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 	}
 
 	ui.Step(out, "verifying prerequisites...")
-	if err := checkTemplateExists(ctx, px, cfg); err != nil {
+	if err := checkTemplatesExist(ctx, px, cfg); err != nil {
 		return err
 	}
 
-	var registryEndpoint string
-	if cfg.Registry != nil {
-		if err := checkRegistryReachable(cfg.Registry.Harbor); err != nil {
-			return err
+	for _, spec := range cfg.Clusters {
+		if spec.Addons.Registry != nil {
+			if err := checkRegistryReachable(config.HarborConfig{
+				Hostname: spec.Addons.Registry.Hostname,
+				HTTPPort: spec.Addons.Registry.HTTPPort,
+			}); err != nil {
+				return fmt.Errorf("cluster %s: %w", spec.Name, err)
+			}
 		}
-		registryEndpoint = fmt.Sprintf("http://%s:%d",
-			cfg.Registry.Harbor.Hostname, cfg.Registry.Harbor.HTTPPort)
 	}
 	ui.Success(out, "prerequisites OK")
 
@@ -115,14 +120,14 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 		return err
 	}
 
-	_, err = provisionClusters(ctx, cfg, px, keyPath, registryEndpoint, out)
+	_, err = provisionClusters(ctx, cfg, px, keyPath, out)
 	return err
 }
 
 // provisionClusters pre-allocates VMIDs, creates all clusters in parallel,
 // installs addons, and connects the mesh when all mesh clusters are present.
-// The caller is responsible for ensuring the template exists before calling.
-func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Client, keyPath string, registryEndpoint string, out io.Writer) ([]*clusterState, error) {
+// The caller is responsible for ensuring templates exist before calling.
+func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Client, keyPath string, out io.Writer) ([]*clusterState, error) {
 	// Pre-allocate VMID ranges sequentially to avoid races during parallel creation.
 	nextVMID := cfg.Template.VMIDBase + 1
 	vmidBases := make([]int, len(cfg.Clusters))
@@ -143,6 +148,11 @@ func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Cli
 		g.Go(func() error {
 			pw := util.NewPrefixWriter(spec.Name, out)
 			clusterCfg := cfg.ToClusterConfig(spec)
+
+			var registryEndpoint string
+			if spec.Addons.Registry != nil {
+				registryEndpoint = fmt.Sprintf("http://%s:%d", spec.Addons.Registry.Hostname, spec.Addons.Registry.HTTPPort)
+			}
 
 			if err := createSingle(gctx, clusterCfg, vmidBases[i], registryEndpoint, pw); err != nil {
 				return fmt.Errorf("cluster %s: %w", spec.Name, err)
@@ -183,16 +193,13 @@ func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Cli
 	ui.Success(out, "All clusters ready — %d cluster(s)", len(states))
 	for _, st := range states {
 		ui.Info(out, "  %s  kubeconfig → %s", st.spec.Name, st.spec.KubeconfigPath)
-		if st.spec.Monitoring.Enabled {
+		if st.spec.Addons.Monitoring.Enabled {
 			ui.Info(out, "  %s  Prometheus :%d  Grafana :%d",
 				st.spec.Name,
-				st.spec.Monitoring.PrometheusNodePort,
-				st.spec.Monitoring.GrafanaNodePort,
+				st.spec.Addons.Monitoring.PrometheusNodePort,
+				st.spec.Addons.Monitoring.GrafanaNodePort,
 			)
 		}
-	}
-	if cfg.Registry != nil {
-		ui.Info(out, "  harbor  http://%s:%d", cfg.Registry.Harbor.Hostname, cfg.Registry.Harbor.HTTPPort)
 	}
 	return states, nil
 }
@@ -207,6 +214,52 @@ func checkTemplateExists(ctx context.Context, px *pxclient.Client, cfg *config.C
 	}
 	if vm == nil {
 		return fmt.Errorf("template %q not found — run 'proxmox-k3s template create' first", name)
+	}
+	return nil
+}
+
+// collectTemplateNames returns the deduplicated set of template VM names referenced
+// by all node specs. Falls back to cfg.Template.Name for nodes without an override.
+func collectTemplateNames(cfg *config.Config) []string {
+	seen := map[string]bool{}
+	for _, spec := range cfg.Clusters {
+		for _, node := range spec.ControlPlane {
+			name := node.Template
+			if name == "" {
+				name = cfg.Template.Name
+			}
+			seen[name] = true
+		}
+		for _, node := range spec.Workers {
+			name := node.Template
+			if name == "" {
+				name = cfg.Template.Name
+			}
+			seen[name] = true
+		}
+	}
+	if len(seen) == 0 {
+		seen[cfg.Template.Name] = true
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	return names
+}
+
+// checkTemplatesExist verifies that every unique template name referenced by
+// node specs exists in Proxmox, falling back to cfg.Template.Name when a node
+// does not specify its own template.
+func checkTemplatesExist(ctx context.Context, px *pxclient.Client, cfg *config.Config) error {
+	for _, name := range collectTemplateNames(cfg) {
+		vm, err := px.FindVMByName(ctx, name)
+		if err != nil {
+			return fmt.Errorf("looking up template %q: %w", name, err)
+		}
+		if vm == nil {
+			return fmt.Errorf("template %q not found — run 'proxmox-k3s template create' first", name)
+		}
 	}
 	return nil
 }
@@ -275,7 +328,7 @@ func SetupMesh(ctx context.Context, cfg *config.Config, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		runner, err := util.DialWithKey(spec.ControlPlane[0].IP, 22, "ubuntu", keyPath)
+		runner, err := util.DialWithKey(spec.ControlPlane[0].IP, 22, config.VMSSHUser, keyPath)
 		if err != nil {
 			return fmt.Errorf("cluster %q control plane not reachable at %s — run 'proxmox-k3s cluster create' first",
 				entry.Cluster, spec.ControlPlane[0].IP)
@@ -347,7 +400,7 @@ func setupRegistry(ctx context.Context, cfg *config.Config, px *pxclient.Client,
 		Gateway:     r.VM.Gateway,
 		DNS:         r.VM.DNS,
 		SubnetMask:  r.VM.SubnetMask,
-		User:        "ubuntu",
+		User:        config.VMSSHUser,
 		SSHPubKey:   keyPair.PublicKey,
 		ClusterName: "harbor",
 		Role:        "registry",
@@ -358,7 +411,7 @@ func setupRegistry(ctx context.Context, cfg *config.Config, px *pxclient.Client,
 		return "", fmt.Errorf("registry VM: %w", err)
 	}
 
-	runner, err := util.WaitForSSH(vmInfo.IP, 22, "ubuntu", keyPair.PrivateKeyPath, 5*time.Minute)
+	runner, err := util.WaitForSSH(vmInfo.IP, 22, config.VMSSHUser, keyPair.PrivateKeyPath, 5*time.Minute)
 	if err != nil {
 		return "", fmt.Errorf("SSH to registry VM: %w", err)
 	}
@@ -375,7 +428,7 @@ func setupRegistry(ctx context.Context, cfg *config.Config, px *pxclient.Client,
 func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 	// Use WaitForSSH instead of DialWithKey: the CP may be briefly unreachable
 	// right after k3s starts (network stack flap, systemd restarts).
-	runner, err := util.WaitForSSH(st.cpIP, 22, "ubuntu", st.keyPath, 2*time.Minute)
+	runner, err := util.WaitForSSH(st.cpIP, 22, config.VMSSHUser, st.keyPath, 2*time.Minute)
 	if err != nil {
 		return fmt.Errorf("SSH to %s CP: %w", st.spec.Name, err)
 	}
@@ -385,27 +438,43 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 		return fmt.Errorf("[%s] Helm: %w", st.spec.Name, err)
 	}
 
-	if st.spec.Cilium.Enabled {
+	if st.spec.Addons.Cilium.Enabled {
 		clusterID, inMesh := cfg.ClusterMeshID(st.spec.Name)
-		if err := addons.InstallCilium(runner, st.spec.Cilium, st.spec.Name, st.cpIP, clusterID, inMesh, out); err != nil {
+		if err := addons.InstallCilium(runner, st.spec.Addons.Cilium, st.spec.Name, st.cpIP, clusterID, inMesh, out); err != nil {
 			return err
 		}
 	}
 
-	if st.spec.Monitoring.Enabled {
-		if err := addons.InstallMonitoring(runner, st.spec.Monitoring, st.spec.Name, out); err != nil {
+	if st.spec.Addons.Monitoring.Enabled {
+		if err := addons.InstallMonitoring(runner, st.spec.Addons.Monitoring, st.spec.Name, out); err != nil {
 			return err
 		}
 	}
 
-	if st.spec.Istio.Enabled {
-		if err := addons.InstallIstio(runner, st.spec.Istio, st.spec.Name, out); err != nil {
+	if st.spec.Addons.Istio.Enabled {
+		if err := addons.InstallIstio(runner, st.spec.Addons.Istio, st.spec.Name, out); err != nil {
 			return err
+		}
+		if st.spec.Addons.Monitoring.Enabled {
+			if err := addons.InstallIstioMonitors(runner, st.spec.Name, out); err != nil {
+				return err
+			}
 		}
 	}
 
-	if st.spec.NFS.Enabled {
-		if err := addons.InstallNFSCSI(runner, cfg.NFS.VM.IP, st.spec.Name, cfg.NFS.DataDir, st.spec.NFS, out); err != nil {
+	if st.spec.Addons.NFS.Enabled {
+		ui.Step(out, "[%s] configuring NFS server export...", st.spec.Name)
+		if err := ConfigureNFSExportForCluster(
+			st.spec.Addons.NFS.Server,
+			st.spec.Addons.NFS.DataDir,
+			st.spec.Addons.NFS.ExportSubnet,
+			st.spec.Name,
+			st.keyPath,
+			out,
+		); err != nil {
+			return err
+		}
+		if err := addons.InstallNFSCSI(runner, st.spec.Addons.NFS.Server, st.spec.Name, st.spec.Addons.NFS.DataDir, st.spec.Addons.NFS, out); err != nil {
 			return err
 		}
 	}
@@ -419,7 +488,7 @@ func connectMesh(cfg *config.Config, states []*clusterState, out io.Writer) erro
 	ui.Section(out, "=== Cilium cluster mesh ===")
 
 	for _, st := range states {
-		runner, err := util.DialWithKey(st.cpIP, 22, "ubuntu", st.keyPath)
+		runner, err := util.DialWithKey(st.cpIP, 22, config.VMSSHUser, st.keyPath)
 		if err != nil {
 			return fmt.Errorf("SSH to %s: %w", st.spec.Name, err)
 		}
@@ -439,7 +508,7 @@ func connectMesh(cfg *config.Config, states []*clusterState, out io.Writer) erro
 			continue
 		}
 
-		runner, err := util.DialWithKey(source.cpIP, 22, "ubuntu", source.keyPath)
+		runner, err := util.DialWithKey(source.cpIP, 22, config.VMSSHUser, source.keyPath)
 		if err != nil {
 			return fmt.Errorf("SSH to %s: %w", source.spec.Name, err)
 		}
@@ -529,23 +598,28 @@ func createSingle(ctx context.Context, cfg *config.Config, vmidBase int, registr
 func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmidBase int, out io.Writer) ([]*pxclient.VMInfo, error) {
 	specs := make([]pxclient.VMSpec, 0, len(cfg.ControlPlane))
 	for i, node := range cfg.ControlPlane {
+		templateName := node.Template
+		if templateName == "" {
+			templateName = cfg.Template.Name
+		}
 		specs = append(specs, pxclient.VMSpec{
-			VMID:        vmidBase + i,
-			Name:        config.PrefixedNodeName(cfg.ClusterName, node.Name),
-			ProxmoxNode: node.ProxmoxNode,
-			Cores:       node.Cores,
-			Memory:      node.Memory,
-			DiskSize:    node.DiskSize,
-			Storage:     node.Storage,
-			Bridge:      node.Bridge,
-			IPAddress:   node.IP,
-			Gateway:     node.Gateway,
-			DNS:         node.DNS,
-			SubnetMask:  node.SubnetMask,
-			User:        "ubuntu",
-			SSHPubKey:   pubKey,
-			ClusterName: cfg.ClusterName,
-			Role:        "server",
+			TemplateName: templateName,
+			VMID:         vmidBase + i,
+			Name:         config.PrefixedNodeName(cfg.ClusterName, node.Name),
+			ProxmoxNode:  node.ProxmoxNode,
+			Cores:        node.Cores,
+			Memory:       node.Memory,
+			DiskSize:     node.DiskSize,
+			Storage:      node.Storage,
+			Bridge:       node.Bridge,
+			IPAddress:    node.IP,
+			Gateway:      node.Gateway,
+			DNS:          node.DNS,
+			SubnetMask:   node.SubnetMask,
+			User:         config.VMSSHUser,
+			SSHPubKey:    pubKey,
+			ClusterName:  cfg.ClusterName,
+			Role:         "server",
 		})
 	}
 
@@ -559,25 +633,30 @@ func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config
 func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmidBase int, out io.Writer) ([]*pxclient.VMInfo, error) {
 	specs := make([]pxclient.VMSpec, 0, len(cfg.Workers))
 	for i, node := range cfg.Workers {
+		templateName := node.Template
+		if templateName == "" {
+			templateName = cfg.Template.Name
+		}
 		specs = append(specs, pxclient.VMSpec{
-			VMID:        vmidBase + i,
-			Name:        config.PrefixedNodeName(cfg.ClusterName, node.Name),
-			ProxmoxNode: node.ProxmoxNode,
-			Cores:       node.Cores,
-			Memory:      node.Memory,
-			DiskSize:    node.DiskSize,
-			Storage:     node.Storage,
-			Bridge:      node.Bridge,
-			IPAddress:   node.IP,
-			Gateway:     node.Gateway,
-			DNS:         node.DNS,
-			SubnetMask:  node.SubnetMask,
-			User:        "ubuntu",
-			SSHPubKey:   pubKey,
-			ClusterName: cfg.ClusterName,
-			Role:        "agent",
-			Labels:      node.Labels,
-			Taints:      node.Taints,
+			TemplateName: templateName,
+			VMID:         vmidBase + i,
+			Name:         config.PrefixedNodeName(cfg.ClusterName, node.Name),
+			ProxmoxNode:  node.ProxmoxNode,
+			Cores:        node.Cores,
+			Memory:       node.Memory,
+			DiskSize:     node.DiskSize,
+			Storage:      node.Storage,
+			Bridge:       node.Bridge,
+			IPAddress:    node.IP,
+			Gateway:      node.Gateway,
+			DNS:          node.DNS,
+			SubnetMask:   node.SubnetMask,
+			User:         config.VMSSHUser,
+			SSHPubKey:    pubKey,
+			ClusterName:  cfg.ClusterName,
+			Role:         "agent",
+			Labels:       node.Labels,
+			Taints:       node.Taints,
 		})
 	}
 

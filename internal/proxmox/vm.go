@@ -1,4 +1,4 @@
-﻿package proxmox
+package proxmox
 
 import (
 	"context"
@@ -25,24 +25,25 @@ const (
 )
 
 type VMSpec struct {
-	VMID        int
-	Name        string
-	ProxmoxNode string
-	Cores       int
-	Memory      int
-	DiskSize    int
-	Storage     string
-	Bridge      string
-	User        string
-	SSHPubKey   string
-	IPAddress   string
-	Gateway     string
-	DNS         string
-	SubnetMask  int
-	ClusterName string
-	Role        string
-	Labels      []string
-	Taints      []string
+	TemplateName string // template VM to clone; falls back to cfg.Template.Name when empty
+	VMID         int
+	Name         string
+	ProxmoxNode  string
+	Cores        int
+	Memory       int
+	DiskSize     int
+	Storage      string
+	Bridge       string
+	User         string
+	SSHPubKey    string
+	IPAddress    string
+	Gateway      string
+	DNS          string
+	SubnetMask   int
+	ClusterName  string
+	Role         string
+	Labels       []string
+	Taints       []string
 }
 
 type VMInfo struct {
@@ -66,7 +67,10 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		return &VMInfo{VMID: int(existing.VMID), Name: spec.Name, IP: ip, VM: existing}, nil
 	}
 
-	tmplName := TemplateName(cfg)
+	tmplName := spec.TemplateName
+	if tmplName == "" {
+		tmplName = TemplateName(cfg)
+	}
 	tmpl, err := c.FindVMByName(ctx, tmplName)
 	if err != nil || tmpl == nil {
 		return nil, fmt.Errorf("template %q not found; run template creation first", tmplName)
@@ -107,9 +111,11 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		tag := "proxmox-k3s;" + spec.ClusterName + ";role-" + spec.Role
 
 		body := encodeConfigBody(map[string]string{
-			"cores":      fmt.Sprintf("%d", spec.Cores),
-			"memory":     fmt.Sprintf("%d", spec.Memory),
-			"net0":       fmt.Sprintf("virtio,bridge=%s", spec.Bridge),
+			"cores":  fmt.Sprintf("%d", spec.Cores),
+			"memory": fmt.Sprintf("%d", spec.Memory),
+			// net0 is inherited from the template clone; reconfiguring it via
+			// the config API triggers Proxmox format validation errors across
+			// versions. Bridge changes belong on the Clone options instead.
 			"ciuser":     spec.User,
 			"sshkeys":    encodeSSHKey(spec.SSHPubKey),
 			"ipconfig0":  buildIPConfig(spec),

@@ -14,18 +14,8 @@ const (
 	nfsCSINamespace = "kube-system"
 )
 
-// InstallNFSCSI installs the NFS CSI driver via Helm and creates a StorageClass
-// pointing to the cluster's dedicated subdirectory on the NFS server.
-func InstallNFSCSI(runner *util.Runner, nfsServerIP, clusterName, dataDir string, addon config.NFSAddonConfig, out io.Writer) error {
-	ui.Step(out, "[%s] adding NFS CSI Helm repo...", clusterName)
-	if err := helmAddRepo(runner, "csi-driver-nfs", nfsCSIRepo, out); err != nil {
-		return err
-	}
-
-	// Controller prefers the management node pool; node DaemonSet tolerates the
-	// management taint so it can also run there when NFS PVCs are used by
-	// management workloads.
-	values := `controller:
+// nfsCSIValuesTemplate is the Helm values for the NFS CSI driver.
+const nfsCSIValuesTemplate = `controller:
   affinity:
     nodeAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
@@ -49,15 +39,9 @@ node:
     effect: "NoSchedule"
 `
 
-	chart := fmt.Sprintf("csi-driver-nfs/csi-driver-nfs --version %s", addon.Version)
-	ui.Step(out, "[%s] installing NFS CSI driver %s...", clusterName, addon.Version)
-	if err := helmInstall(runner, "csi-driver-nfs", chart, nfsCSINamespace, values, "", out); err != nil {
-		return fmt.Errorf("[%s] NFS CSI driver: %w", clusterName, err)
-	}
-
-	// Create a StorageClass backed by the cluster's dedicated NFS share.
-	share := fmt.Sprintf("%s/%s", dataDir, clusterName)
-	storageClass := fmt.Sprintf(`apiVersion: storage.k8s.io/v1
+// nfsStorageClassTemplate is the StorageClass manifest template.
+// Format args: nfsServerIP, share path.
+const nfsStorageClassTemplate = `apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: nfs
@@ -69,7 +53,29 @@ parameters:
 reclaimPolicy: Retain
 volumeBindingMode: Immediate
 allowVolumeExpansion: true
-`, nfsServerIP, share)
+`
+
+// InstallNFSCSI installs the NFS CSI driver via Helm and creates a StorageClass
+// pointing to the cluster's dedicated subdirectory on the NFS server.
+func InstallNFSCSI(runner *util.Runner, nfsServerIP, clusterName, dataDir string, addon config.NFSAddonConfig, out io.Writer) error {
+	ui.Step(out, "[%s] adding NFS CSI Helm repo...", clusterName)
+	if err := helmAddRepo(runner, "csi-driver-nfs", nfsCSIRepo, out); err != nil {
+		return err
+	}
+
+	// Controller prefers the management node pool; node DaemonSet tolerates the
+	// management taint so it can also run there when NFS PVCs are used by
+	// management workloads.
+
+	chart := fmt.Sprintf("csi-driver-nfs/csi-driver-nfs --version %s", addon.Version)
+	ui.Step(out, "[%s] installing NFS CSI driver %s...", clusterName, addon.Version)
+	if err := helmInstall(runner, "csi-driver-nfs", chart, nfsCSINamespace, nfsCSIValuesTemplate, "", out); err != nil {
+		return fmt.Errorf("[%s] NFS CSI driver: %w", clusterName, err)
+	}
+
+	// Create a StorageClass backed by the cluster's dedicated NFS share.
+	share := fmt.Sprintf("%s/%s", dataDir, clusterName)
+	storageClass := fmt.Sprintf(nfsStorageClassTemplate, nfsServerIP, share)
 
 	ui.Step(out, "[%s] creating NFS StorageClass (server=%s share=%s)...", clusterName, nfsServerIP, share)
 	if err := runner.WriteFile("/tmp/nfs-storageclass.yaml", []byte(storageClass)); err != nil {

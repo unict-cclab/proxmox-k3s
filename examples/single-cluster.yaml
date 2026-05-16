@@ -1,0 +1,79 @@
+# single-cluster.yaml — single cluster with Istio service mesh
+# Uses the default k3s CNI (flannel) instead of Cilium.
+# Monitoring + Istio together also install PodMonitor/ServiceMonitor for Istio metrics.
+#
+# Self-contained: provisions the VM template and the cluster in one shot.
+#
+#   proxmox-k3s setup-all -c examples/single-cluster.yaml
+#
+# Or step-by-step:
+#   proxmox-k3s template create -c examples/single-cluster.yaml
+#   proxmox-k3s cluster create  -c examples/single-cluster.yaml
+
+proxmox:
+  api_url: https://192.168.1.10:8006/api2/json
+  token_id: root@pam!mytoken
+  token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  insecure_tls: true
+
+# ssh_key_path: ~/.proxmox-k3s/id_ed25519  # auto-generated if omitted
+
+template:
+  name: ubuntu-24.04-template
+  proxmox_node: pve
+  storage: local-lvm        # must support "images" content type
+  image_storage: local      # must support "import" content type
+  os: ubuntu-24.04
+  bridge: vmbr0
+  ip: 192.168.1.49          # static IP for the template boot; omit for DHCP
+  gateway: 192.168.1.1
+  dns: 1.1.1.1
+  subnet_mask: 24
+
+clusters:
+  - name: my-cluster
+    kubeconfig_path: ./kubeconfig
+
+    k3s:
+      version: v1.32.3+k3s1
+      # No --flannel-backend=none: flannel is used as CNI (no Cilium)
+      extra_server_args: "--disable=traefik --disable=servicelb"
+
+    addons:
+      monitoring:
+        enabled: true
+        # version: "84.5.0"
+        prometheus_node_port: 32090
+        grafana_node_port: 32000
+        grafana_admin_password: "admin"
+
+      istio:
+        enabled: true
+        # version: "1.25.2"
+        # gateway_api_version: "v1.3.0"  # omit to auto-resolve latest stable
+
+    control_plane:
+      - name: cp-01
+        template: ubuntu-24.04-template
+        proxmox_node: pve
+        cores: 4
+        memory: 8192
+        disk_size: 40
+        ip: 192.168.1.100
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
+
+    workers:
+      - name: worker-01
+        template: ubuntu-24.04-template
+        proxmox_node: pve
+        cores: 4
+        memory: 8192
+        disk_size: 40
+        ip: 192.168.1.110
+        gateway: 192.168.1.1
+        dns: 1.1.1.1
+        subnet_mask: 24
+        labels:
+          - "nodepool=workers"

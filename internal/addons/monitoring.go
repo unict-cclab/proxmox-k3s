@@ -16,16 +16,9 @@ const (
 	monitoringNamespace = "observability"
 )
 
-// InstallMonitoring installs kube-prometheus-stack via Helm.
-// Prometheus is exposed on addon.PrometheusNodePort and Grafana on addon.GrafanaNodePort.
-// Both use the local-path storage class that k3s ships with by default.
-func InstallMonitoring(runner *util.Runner, addon config.MonitoringConfig, clusterName string, out io.Writer) error {
-	ui.Step(out, "[%s] adding prometheus-community Helm repo...", clusterName)
-	if err := helmAddRepo(runner, "prometheus-community", prometheusCommRepo, out); err != nil {
-		return err
-	}
-
-	values := fmt.Sprintf(`alertmanager:
+// monitoringValuesTemplate is the Helm values template for kube-prometheus-stack.
+// Format args: grafanaNodePort (int), grafanaAdminPassword, prometheusNodePort (int).
+const monitoringValuesTemplate = `alertmanager:
   enabled: false
 
 grafana:
@@ -111,7 +104,18 @@ prometheus-node-exporter:
           sourceLabels:
             - __meta_kubernetes_pod_node_name
           targetLabel: instance
-`,
+`
+
+// InstallMonitoring installs kube-prometheus-stack via Helm.
+// Prometheus is exposed on addon.PrometheusNodePort and Grafana on addon.GrafanaNodePort.
+// Both use the local-path storage class that k3s ships with by default.
+func InstallMonitoring(runner *util.Runner, addon config.MonitoringConfig, clusterName string, out io.Writer) error {
+	ui.Step(out, "[%s] adding prometheus-community Helm repo...", clusterName)
+	if err := helmAddRepo(runner, "prometheus-community", prometheusCommRepo, out); err != nil {
+		return err
+	}
+
+	values := fmt.Sprintf(monitoringValuesTemplate,
 		addon.GrafanaNodePort,
 		addon.GrafanaAdminPassword,
 		addon.PrometheusNodePort,

@@ -41,14 +41,18 @@ func Teardown(ctx context.Context, cfg *config.Config, out io.Writer) error {
 		}
 	}
 
-	px, err := pxclient.New(cfg)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(out)
-	ui.Section(out, "=== Deleting template ===")
-	if err := pxclient.DeleteTemplate(ctx, px, cfg, out); err != nil {
-		ui.Warn(out, "error deleting template (continuing): %v", err)
+	if cfg.HasTemplateConfig() {
+		px, err := pxclient.New(cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out)
+		ui.Section(out, "=== Deleting template ===")
+		for _, name := range collectTemplateNames(cfg) {
+			if err := pxclient.DeleteVM(ctx, px, name, out); err != nil {
+				ui.Warn(out, "error deleting template %q (continuing): %v", name, err)
+			}
+		}
 	}
 
 	fmt.Fprintln(out)

@@ -1,0 +1,55 @@
+# shared.yaml — infrastructure provisioning
+# Used with the infra sub-commands (run once, shared across clusters):
+#
+#   proxmox-k3s template create  -c examples/shared.yaml
+#   proxmox-k3s registry create  -c examples/shared.yaml
+#   proxmox-k3s nfs create       -c examples/shared.yaml
+
+proxmox:
+  api_url: https://192.168.1.10:8006/api2/json
+  token_id: root@pam!mytoken
+  token_secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  insecure_tls: true
+
+template:
+  name: ubuntu-24.04-template
+  proxmox_node: pve
+  storage: local-lvm        # must support "images" content type
+  image_storage: local      # must support "import" content type (local dir storage)
+  os: ubuntu-24.04
+  bridge: vmbr0
+  ip: 192.168.1.49          # static IP for the template boot; omit for DHCP
+  gateway: 192.168.1.1
+  dns: 1.1.1.1
+  subnet_mask: 24
+
+registry:
+  vm:
+    name: harbor
+    proxmox_node: pve
+    cores: 4
+    memory: 8192
+    disk_size: 80
+    ip: 192.168.1.50
+    gateway: 192.168.1.1
+    dns: 1.1.1.1
+    subnet_mask: 24
+  harbor:
+    hostname: 192.168.1.50
+    admin_password: Harbor12345
+    data_volume: /data
+    http_port: 80
+
+nfs:
+  vm:
+    name: nfs-server
+    proxmox_node: pve
+    cores: 2
+    memory: 2048
+    disk_size: 100           # data disk size in GB
+    ip: 192.168.1.51
+    gateway: 192.168.1.1
+    dns: 1.1.1.1
+    subnet_mask: 24
+  data_dir: /data/nfs        # base path; each cluster gets a subdirectory
+  export_subnet: "192.168.1.0/24"

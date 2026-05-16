@@ -28,6 +28,9 @@ type Config struct {
 	Proxmox  ProxmoxConfig  `yaml:"proxmox"`
 	Template TemplateConfig `yaml:"template"`
 
+	// templateConfigured is true when the YAML contained an explicit template block.
+	templateConfigured bool
+
 	// Single-cluster k3s and node definitions
 	K3s          K3sConfig    `yaml:"k3s"`
 	PodCIDR      string       `yaml:"pod_cidr"`
@@ -58,24 +61,38 @@ func (c *Config) ClusterMeshID(name string) (int, bool) {
 
 // ClusterSpec is the per-cluster definition used in multi-cluster configs.
 type ClusterSpec struct {
-	Name           string           `yaml:"name"`
-	KubeconfigPath string           `yaml:"kubeconfig_path"`
-	PodCIDR        string           `yaml:"pod_cidr"`
-	ServiceCIDR    string           `yaml:"service_cidr"`
-	Cilium         CiliumConfig     `yaml:"cilium"`
-	Monitoring     MonitoringConfig `yaml:"monitoring"`
-	Istio          IstioConfig      `yaml:"istio"`
-	NFS            NFSAddonConfig   `yaml:"nfs"`
-	K3s            K3sConfig        `yaml:"k3s"`
-	ControlPlane   []CPNode         `yaml:"control_plane"`
-	Workers        []WorkerNode     `yaml:"workers"`
+	Name           string        `yaml:"name"`
+	KubeconfigPath string        `yaml:"kubeconfig_path"`
+	PodCIDR        string        `yaml:"pod_cidr"`
+	ServiceCIDR    string        `yaml:"service_cidr"`
+	Addons         ClusterAddons `yaml:"addons"`
+	K3s            K3sConfig     `yaml:"k3s"`
+	ControlPlane   []CPNode      `yaml:"control_plane"`
+	Workers        []WorkerNode  `yaml:"workers"`
+}
+
+// ClusterAddons groups optional per-cluster addon configurations.
+type ClusterAddons struct {
+	Cilium     CiliumConfig        `yaml:"cilium"`
+	Monitoring MonitoringConfig    `yaml:"monitoring"`
+	Istio      IstioConfig         `yaml:"istio"`
+	NFS        NFSAddonConfig      `yaml:"nfs"`
+	Registry   *ClusterRegistryRef `yaml:"registry,omitempty"`
+}
+
+// ClusterRegistryRef references a pre-existing Harbor registry for a cluster.
+// Only the connection details are needed — no VM provisioning is performed.
+type ClusterRegistryRef struct {
+	Hostname string `yaml:"hostname"`
+	HTTPPort int    `yaml:"http_port"`
 }
 
 // CiliumConfig configures Cilium CNI installation per cluster.
 // Set enabled: true to install Cilium. Required for cluster_mesh participation.
 type CiliumConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Version string `yaml:"version"`
+	Enabled          bool   `yaml:"enabled"`
+	Version          string `yaml:"version"`
+	HubbleUINodePort int    `yaml:"hubble_ui_node_port"`
 }
 
 // MonitoringConfig configures the kube-prometheus-stack installation.
@@ -91,8 +108,9 @@ type MonitoringConfig struct {
 // IstioConfig configures Istio service mesh installation per cluster.
 // Set enabled: true to install Istio (base CRDs + istiod). Disabled by default.
 type IstioConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Version string `yaml:"version"`
+	Enabled           bool   `yaml:"enabled"`
+	Version           string `yaml:"version"`
+	GatewayAPIVersion string `yaml:"gateway_api_version"`
 }
 
 // ClusterMeshEntry assigns a Cilium cluster ID to a named cluster that
@@ -110,16 +128,20 @@ type NFSConfig struct {
 	ExportSubnet string `yaml:"export_subnet"`
 }
 
-// NFSAddonConfig controls whether the NFS CSI driver is installed on a cluster.
+// NFSAddonConfig controls the NFS CSI driver installation for a cluster.
+// Server and DataDir point to a pre-existing NFS server; no VM is provisioned.
 type NFSAddonConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Version string `yaml:"version"`
+	Enabled      bool   `yaml:"enabled"`
+	Version      string `yaml:"version"`
+	Server       string `yaml:"server"`        // NFS server IP or hostname
+	DataDir      string `yaml:"data_dir"`      // base export path (default: /data/nfs)
+	ExportSubnet string `yaml:"export_subnet"` // who can mount (default: *)
 }
 
 // RegistryConfig defines an optional Harbor VM that acts as a pull-through
 // cache for all clusters, reducing external bandwidth.
 type RegistryConfig struct {
-	VM     CPNode      `yaml:"vm"`
+	VM     CPNode       `yaml:"vm"`
 	Harbor HarborConfig `yaml:"harbor"`
 }
 
@@ -164,6 +186,7 @@ type K3sConfig struct {
 }
 
 type CPNode struct {
+	Template    string `yaml:"template"` // template VM name to clone (overrides global template.name)
 	Name        string `yaml:"name"`
 	ProxmoxNode string `yaml:"proxmox_node"`
 	Storage     string `yaml:"storage"`
@@ -178,16 +201,23 @@ type CPNode struct {
 }
 
 type WorkerNode struct {
-	CPNode  `yaml:",inline"`
-	Labels  []string `yaml:"labels"`
-	Taints  []string `yaml:"taints"`
+	CPNode `yaml:",inline"`
+	Labels []string `yaml:"labels"`
+	Taints []string `yaml:"taints"`
 }
+
+// VMSSHUser is the SSH username created by cloud-init on all provisioned VMs.
+const VMSSHUser = "ubuntu"
 
 var KnownOSImages = map[string]string{
 	"ubuntu-24.04": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
 	"ubuntu-22.04": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
 	"debian-12":    "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
 }
+
+// HasTemplateConfig reports whether the config file contained an explicit
+// template block. Use this to decide whether teardown should delete the template.
+func (c *Config) HasTemplateConfig() bool { return c.templateConfigured }
 
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -199,6 +229,9 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+
+	// Record whether the user provided a template block before defaults fill it in.
+	cfg.templateConfigured = cfg.Template.Name != "" || cfg.Template.ProxmoxNode != "" || cfg.Template.Storage != ""
 
 	cfg.applyDefaults()
 
@@ -319,7 +352,7 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) applyMultiDefaults() {
 	const (
-		defaultCiliumVersion     = "1.19.3"
+		defaultCiliumVersion     = "1.19.4"
 		defaultMonitoringVersion = "84.5.0"
 		defaultIstioVersion      = "1.25.2"
 		defaultNFSCSIVersion     = "v4.9.0"
@@ -386,27 +419,36 @@ func (c *Config) applyMultiDefaults() {
 		if spec.KubeconfigPath == "" {
 			spec.KubeconfigPath = fmt.Sprintf("./kubeconfig-%s", spec.Name)
 		}
-		if spec.Cilium.Enabled && spec.Cilium.Version == "" {
-			spec.Cilium.Version = defaultCiliumVersion
+		if spec.Addons.Cilium.Enabled && spec.Addons.Cilium.Version == "" {
+			spec.Addons.Cilium.Version = defaultCiliumVersion
 		}
-		if spec.Monitoring.Enabled && spec.Monitoring.Version == "" {
-			spec.Monitoring.Version = defaultMonitoringVersion
+		if spec.Addons.Monitoring.Enabled && spec.Addons.Monitoring.Version == "" {
+			spec.Addons.Monitoring.Version = defaultMonitoringVersion
 		}
-		if spec.Istio.Enabled && spec.Istio.Version == "" {
-			spec.Istio.Version = defaultIstioVersion
+		if spec.Addons.Istio.Enabled && spec.Addons.Istio.Version == "" {
+			spec.Addons.Istio.Version = defaultIstioVersion
 		}
-		if spec.NFS.Enabled && spec.NFS.Version == "" {
-			spec.NFS.Version = defaultNFSCSIVersion
+		if spec.Addons.NFS.Enabled && spec.Addons.NFS.Version == "" {
+			spec.Addons.NFS.Version = defaultNFSCSIVersion
 		}
-		if spec.Monitoring.Enabled {
-			if spec.Monitoring.PrometheusNodePort == 0 {
-				spec.Monitoring.PrometheusNodePort = 32090
+		if spec.Addons.NFS.Enabled && spec.Addons.NFS.DataDir == "" {
+			spec.Addons.NFS.DataDir = defaultNFSDataDir
+		}
+		if spec.Addons.NFS.Enabled && spec.Addons.NFS.ExportSubnet == "" {
+			spec.Addons.NFS.ExportSubnet = defaultNFSExportSubnet
+		}
+		if spec.Addons.Registry != nil && spec.Addons.Registry.HTTPPort == 0 {
+			spec.Addons.Registry.HTTPPort = 80
+		}
+		if spec.Addons.Monitoring.Enabled {
+			if spec.Addons.Monitoring.PrometheusNodePort == 0 {
+				spec.Addons.Monitoring.PrometheusNodePort = 32090
 			}
-			if spec.Monitoring.GrafanaNodePort == 0 {
-				spec.Monitoring.GrafanaNodePort = 32000
+			if spec.Addons.Monitoring.GrafanaNodePort == 0 {
+				spec.Addons.Monitoring.GrafanaNodePort = 32000
 			}
-			if spec.Monitoring.GrafanaAdminPassword == "" {
-				spec.Monitoring.GrafanaAdminPassword = "admin"
+			if spec.Addons.Monitoring.GrafanaAdminPassword == "" {
+				spec.Addons.Monitoring.GrafanaAdminPassword = "admin"
 			}
 		}
 		for j := range spec.ControlPlane {
@@ -459,7 +501,8 @@ func (c *Config) validate() error {
 
 func (c *Config) validateClusters() error {
 	if len(c.Clusters) == 0 {
-		return fmt.Errorf("clusters list is required — use a clusters: list with at least one entry")
+		// Infra-only config (template/registry/nfs commands) — cluster validation not applicable.
+		return nil
 	}
 	if c.Template.CloudImageURL == "" {
 		return fmt.Errorf("unknown os %q; set template.cloud_image_url explicitly", c.Template.OS)
@@ -513,11 +556,23 @@ func (c *Config) validateClusters() error {
 		if n.VM.IP == "" {
 			return fmt.Errorf("nfs.vm.ip is required")
 		}
+		if n.DataDir != "" && !strings.HasPrefix(n.DataDir, "/") {
+			return fmt.Errorf("nfs.data_dir must be an absolute path")
+		}
 	}
 
 	for i, spec := range c.Clusters {
-		if spec.NFS.Enabled && c.NFS == nil {
-			return fmt.Errorf("clusters[%d] (%s): nfs.enabled requires a top-level nfs: block", i, spec.Name)
+		if spec.Addons.NFS.Enabled && spec.Addons.NFS.Server == "" {
+			return fmt.Errorf("clusters[%d] (%s): addons.nfs.enabled requires addons.nfs.server to be set", i, spec.Name)
+		}
+		if spec.Addons.Registry != nil && spec.Addons.Registry.Hostname == "" {
+			return fmt.Errorf("clusters[%d] (%s): addons.registry.hostname is required", i, spec.Name)
+		}
+		if p := spec.Addons.Cilium.HubbleUINodePort; p != 0 && (p < 30000 || p > 32767) {
+			return fmt.Errorf("clusters[%d] (%s): addons.cilium.hubble_ui_node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if spec.Addons.NFS.Enabled && spec.Addons.NFS.DataDir != "" && !strings.HasPrefix(spec.Addons.NFS.DataDir, "/") {
+			return fmt.Errorf("clusters[%d] (%s): addons.nfs.data_dir must be an absolute path", i, spec.Name)
 		}
 	}
 
@@ -540,10 +595,13 @@ func (c *Config) validateClusterMesh(clusterNames map[string]bool) error {
 			return fmt.Errorf("cluster_mesh: duplicate id %d", entry.ID)
 		}
 		usedIDs[entry.ID] = true
+		if entry.ID < 1 || entry.ID > 255 {
+			return fmt.Errorf("cluster_mesh[%d]: id %d is out of range (must be 1–255)", i, entry.ID)
+		}
 
 		for _, spec := range c.Clusters {
 			if spec.Name == entry.Cluster {
-				if !spec.Cilium.Enabled {
+				if !spec.Addons.Cilium.Enabled {
 					return fmt.Errorf("cluster_mesh: cluster %q is in the mesh but has Cilium disabled", spec.Name)
 				}
 				meshClusters = append(meshClusters, spec)

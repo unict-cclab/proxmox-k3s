@@ -36,7 +36,7 @@ func CreateRegistry(ctx context.Context, cfg *config.Config, out io.Writer) (str
 	if existing != nil {
 		endpoint := fmt.Sprintf("http://%s:%d", cfg.Registry.Harbor.Hostname, cfg.Registry.Harbor.HTTPPort)
 		// VM already exists — still ensure proxy projects are created (idempotent).
-		runner, err := util.DialWithKey(cfg.Registry.Harbor.Hostname, 22, "ubuntu", keyPath)
+		runner, err := util.DialWithKey(cfg.Registry.Harbor.Hostname, 22, config.VMSSHUser, keyPath)
 		if err != nil {
 			return endpoint, fmt.Errorf("SSH to registry VM: %w", err)
 		}

@@ -1,4 +1,4 @@
-﻿package k3s
+package k3s
 
 import (
 	"context"
@@ -16,15 +16,46 @@ import (
 )
 
 const (
-	k3sInstallScript  = "https://get.k3s.io"
-	defaultSSHUser    = "ubuntu"
-	sshBootTimeout    = 5 * time.Minute
+	k3sInstallScript = "https://get.k3s.io"
+	sshBootTimeout   = 5 * time.Minute
+
 	joinTokenTimeout  = 2 * time.Minute
 	kubeconfigTimeout = 2 * time.Minute
 	k3sTokenPath      = "/var/lib/rancher/k3s/server/token"
 	k3sNodeTokenPath  = "/var/lib/rancher/k3s/server/node-token"
 	k3sKubeconfigPath = "/etc/rancher/k3s/k3s.yaml"
 )
+
+// registriesConfigTemplate is the k3s containerd mirror config written to
+// /etc/rancher/k3s/registries.yaml on every node.
+// Format arg: registryEndpoint (repeated 5 times, one per registry).
+const registriesConfigTemplate = `mirrors:
+  "docker.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "dockerhub-proxy/$1"
+  "registry.k8s.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "k8s-proxy/$1"
+  "ghcr.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "ghcr-proxy/$1"
+  "gcr.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "gcr-proxy/$1"
+  "quay.io":
+    endpoint:
+      - %q
+    rewrite:
+      "^(.*)": "quay-proxy/$1"
+`
 
 type NodeInfo struct {
 	IP     string
@@ -45,7 +76,7 @@ func New(cfg *config.Config, keyPath string, out io.Writer) *Installer {
 	return &Installer{
 		cfg:        cfg,
 		keyPath:    keyPath,
-		sshUser:    defaultSSHUser,
+		sshUser:    config.VMSSHUser,
 		k3sVersion: cfg.K3s.Version,
 		out:        out,
 	}
@@ -372,39 +403,8 @@ func (i *Installer) writeRegistriesConfig(runner *util.Runner) error {
 	if i.registryEndpoint == "" {
 		return nil
 	}
-	content := fmt.Sprintf(`mirrors:
-  "docker.io":
-    endpoint:
-      - %q
-    rewrite:
-      "^(.*)": "dockerhub-proxy/$1"
-  "registry.k8s.io":
-    endpoint:
-      - %q
-    rewrite:
-      "^(.*)": "k8s-proxy/$1"
-  "ghcr.io":
-    endpoint:
-      - %q
-    rewrite:
-      "^(.*)": "ghcr-proxy/$1"
-  "gcr.io":
-    endpoint:
-      - %q
-    rewrite:
-      "^(.*)": "gcr-proxy/$1"
-  "quay.io":
-    endpoint:
-      - %q
-    rewrite:
-      "^(.*)": "quay-proxy/$1"
-`,
-		i.registryEndpoint,
-		i.registryEndpoint,
-		i.registryEndpoint,
-		i.registryEndpoint,
-		i.registryEndpoint,
-	)
+	ep := i.registryEndpoint
+	content := fmt.Sprintf(registriesConfigTemplate, ep, ep, ep, ep, ep)
 	if err := runner.WriteFile("/tmp/registries.yaml", []byte(content)); err != nil {
 		return err
 	}

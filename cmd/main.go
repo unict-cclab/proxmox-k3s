@@ -1,9 +1,10 @@
-﻿package main
+package main
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -38,7 +39,6 @@ func rootCmd() *cobra.Command {
 		templateCmd(),
 		registryCmd(),
 		nfsCmd(),
-		meshCmd(),
 	)
 	return root
 }
@@ -48,7 +48,7 @@ func setupAllCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "setup-all",
-		Short: "Provision everything from scratch: template → registry → clusters → mesh",
+		Short: "Provision all resources",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -67,7 +67,7 @@ func deleteAllCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "delete-all",
-		Short: "Tear down everything: clusters → registry → template",
+		Short: "Tear down all resources",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -94,7 +94,7 @@ func clusterCmd() *cobra.Command {
 		Use:   "cluster",
 		Short: "Manage k3s clusters",
 	}
-	cmd.AddCommand(createCmd(), deleteCmd(), kubeconfigCmd())
+	cmd.AddCommand(createCmd(), deleteCmd(), kubeconfigCmd(), clusterMeshCmd())
 	return cmd
 }
 
@@ -236,13 +236,13 @@ func kubeconfigCmd() *cobra.Command {
 
 			ip := spec.ControlPlane[0].IP
 			if ip == "" {
-				ip, err = pxclient.WaitForIP(context.Background(), vm, 30e9)
+				ip, err = pxclient.WaitForIP(context.Background(), vm, 30*time.Second)
 				if err != nil {
 					return fmt.Errorf("getting CP IP: %w", err)
 				}
 			}
 
-			runner, err := util.DialWithKey(ip, 22, "ubuntu", keyPair.PrivateKeyPath)
+			runner, err := util.DialWithKey(ip, 22, config.VMSSHUser, keyPair.PrivateKeyPath)
 			if err != nil {
 				return fmt.Errorf("SSH to %s: %w", ip, err)
 			}
@@ -284,7 +284,7 @@ func templateCmd() *cobra.Command {
 
 	createSub := &cobra.Command{
 		Use:   "create",
-		Short: "Build the VM template (runs automatically during cluster create)",
+		Short: "Build the VM template (runs automatically during setup-all)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -338,7 +338,7 @@ func registryCmd() *cobra.Command {
 
 	createSub := &cobra.Command{
 		Use:   "create",
-		Short: "Provision the Harbor registry VM (runs automatically during cluster create)",
+		Short: "Provision the Harbor registry VM (runs automatically during setup-all)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -437,17 +437,12 @@ func nfsCmd() *cobra.Command {
 	return cmd
 }
 
-func meshCmd() *cobra.Command {
+func clusterMeshCmd() *cobra.Command {
 	var configPath string
 
 	cmd := &cobra.Command{
 		Use:   "mesh",
-		Short: "Manage Cilium cluster mesh",
-	}
-
-	connectSub := &cobra.Command{
-		Use:   "connect",
-		Short: "Connect clusters into a Cilium cluster mesh",
+		Short: "Connect already-running clusters into a Cilium cluster mesh",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -457,8 +452,6 @@ func meshCmd() *cobra.Command {
 		},
 	}
 
-	connectSub.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
-	cmd.AddCommand(connectSub)
+	cmd.Flags().StringVarP(&configPath, "config", "c", "cluster.yaml", "path to cluster config file")
 	return cmd
 }
-

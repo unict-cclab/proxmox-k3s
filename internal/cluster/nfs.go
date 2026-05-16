@@ -40,7 +40,7 @@ func CreateNFSServer(ctx context.Context, cfg *config.Config, out io.Writer) err
 	existing, _ := px.FindVMByName(ctx, n.VM.Name)
 	if existing != nil {
 		ui.Info(out, "NFS server VM %q already exists, refreshing exports...", n.VM.Name)
-		runner, err := util.DialWithKey(n.VM.IP, 22, "ubuntu", keyPair.PrivateKeyPath)
+		runner, err := util.DialWithKey(n.VM.IP, 22, config.VMSSHUser, keyPair.PrivateKeyPath)
 		if err != nil {
 			return fmt.Errorf("SSH to NFS server: %w", err)
 		}
@@ -66,7 +66,7 @@ func CreateNFSServer(ctx context.Context, cfg *config.Config, out io.Writer) err
 		Gateway:     n.VM.Gateway,
 		DNS:         n.VM.DNS,
 		SubnetMask:  n.VM.SubnetMask,
-		User:        "ubuntu",
+		User:        config.VMSSHUser,
 		SSHPubKey:   keyPair.PublicKey,
 		ClusterName: "nfs",
 		Role:        "nfs",
@@ -76,7 +76,7 @@ func CreateNFSServer(ctx context.Context, cfg *config.Config, out io.Writer) err
 		return fmt.Errorf("NFS server VM: %w", err)
 	}
 
-	runner, err := util.WaitForSSH(n.VM.IP, 22, "ubuntu", keyPair.PrivateKeyPath, 5*time.Minute)
+	runner, err := util.WaitForSSH(n.VM.IP, 22, config.VMSSHUser, keyPair.PrivateKeyPath, 5*time.Minute)
 	if err != nil {
 		return fmt.Errorf("SSH to NFS server: %w", err)
 	}
@@ -104,8 +104,42 @@ func DeleteNFSServer(ctx context.Context, cfg *config.Config, out io.Writer) err
 	return pxclient.DeleteVM(ctx, px, cfg.NFS.VM.Name, out)
 }
 
+// ConfigureNFSExportForCluster SSHes into a pre-existing NFS server, creates
+// the cluster's export directory, appends its /etc/exports entry (idempotent),
+// and reloads the export table. Called from cluster create when nfs.enabled.
+func ConfigureNFSExportForCluster(nfsServer, dataDir, exportSubnet, clusterName, keyPath string, out io.Writer) error {
+	runner, err := util.WaitForSSH(nfsServer, 22, config.VMSSHUser, keyPath, 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("SSH to NFS server %s: %w", nfsServer, err)
+	}
+	defer runner.Close()
+
+	dir := dataDir + "/" + clusterName
+	if _, err := runner.Output(fmt.Sprintf("sudo mkdir -p %s && sudo chmod 777 %s", dir, dir)); err != nil {
+		return fmt.Errorf("creating NFS directory %s: %w", dir, err)
+	}
+
+	line := fmt.Sprintf("%s %s(rw,sync,no_subtree_check,no_root_squash)", dir, exportSubnet)
+	addCmd := fmt.Sprintf(
+		"grep -qF %q /etc/exports || echo %q | sudo tee -a /etc/exports > /dev/null",
+		dir, line,
+	)
+	if _, err := runner.Output(addCmd); err != nil {
+		return fmt.Errorf("adding NFS export for %s: %w", clusterName, err)
+	}
+
+	if err := runner.Run("sudo exportfs -rav", out); err != nil {
+		return fmt.Errorf("reloading NFS exports: %w", err)
+	}
+	return nil
+}
+
 // configureNFSExports writes /etc/exports with one entry per cluster and reloads.
 func configureNFSExports(runner *util.Runner, n *config.NFSConfig, clusters []config.ClusterSpec, out io.Writer) error {
+	if len(clusters) == 0 {
+		ui.Info(out, "no clusters defined — skipping NFS export configuration")
+		return nil
+	}
 	ui.Step(out, "configuring NFS exports...")
 
 	var dirs []string
