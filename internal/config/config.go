@@ -76,6 +76,8 @@ type ClusterAddons struct {
 	Cilium     CiliumConfig        `yaml:"cilium"`
 	Monitoring MonitoringConfig    `yaml:"monitoring"`
 	Istio      IstioConfig         `yaml:"istio"`
+	Jaeger     JaegerConfig        `yaml:"jaeger"`
+	Kiali      KialiConfig         `yaml:"kiali"`
 	NFS        NFSAddonConfig      `yaml:"nfs"`
 	Registry   *ClusterRegistryRef `yaml:"registry,omitempty"`
 }
@@ -111,6 +113,22 @@ type IstioConfig struct {
 	Enabled           bool   `yaml:"enabled"`
 	Version           string `yaml:"version"`
 	GatewayAPIVersion string `yaml:"gateway_api_version"`
+}
+
+// JaegerConfig configures Jaeger all-in-one tracing deployment per cluster.
+// Requires Istio to be enabled. Disabled by default.
+type JaegerConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Version  string `yaml:"version"`   // image tag, default "1.53"
+	NodePort int    `yaml:"node_port"` // NodePort for UI (port 16686), default 30002
+}
+
+// KialiConfig configures Kiali service mesh console deployment per cluster.
+// Installed automatically when Istio is enabled; configure node_port/version here.
+type KialiConfig struct {
+	Version    string `yaml:"version"`     // image tag, default "v2.8"
+	NodePort   int    `yaml:"node_port"`   // NodePort for UI (port 20001), default 30001
+	SigningKey  string `yaml:"signing_key"` // JWT signing key, default "proxmox-k3s-kiali"
 }
 
 // ClusterMeshEntry assigns a Cilium cluster ID to a named cluster that
@@ -355,6 +373,8 @@ func (c *Config) applyMultiDefaults() {
 		defaultCiliumVersion     = "1.19.4"
 		defaultMonitoringVersion = "84.5.0"
 		defaultIstioVersion      = "1.25.2"
+		defaultJaegerVersion     = "1.53"
+		defaultKialiVersion      = "v2.8"
 		defaultNFSCSIVersion     = "v4.9.0"
 		defaultNFSDataDir        = "/data/nfs"
 		defaultNFSExportSubnet   = "*"
@@ -427,6 +447,25 @@ func (c *Config) applyMultiDefaults() {
 		}
 		if spec.Addons.Istio.Enabled && spec.Addons.Istio.Version == "" {
 			spec.Addons.Istio.Version = defaultIstioVersion
+		}
+		if spec.Addons.Jaeger.Enabled {
+			if spec.Addons.Jaeger.Version == "" {
+				spec.Addons.Jaeger.Version = defaultJaegerVersion
+			}
+			if spec.Addons.Jaeger.NodePort == 0 {
+				spec.Addons.Jaeger.NodePort = 30002
+			}
+		}
+		if spec.Addons.Istio.Enabled {
+			if spec.Addons.Kiali.Version == "" {
+				spec.Addons.Kiali.Version = defaultKialiVersion
+			}
+			if spec.Addons.Kiali.NodePort == 0 {
+				spec.Addons.Kiali.NodePort = 30001
+			}
+			if spec.Addons.Kiali.SigningKey == "" {
+				spec.Addons.Kiali.SigningKey = "proxmox-k3s-kiali"
+			}
 		}
 		if spec.Addons.NFS.Enabled && spec.Addons.NFS.Version == "" {
 			spec.Addons.NFS.Version = defaultNFSCSIVersion
@@ -570,6 +609,15 @@ func (c *Config) validateClusters() error {
 		}
 		if p := spec.Addons.Cilium.HubbleUINodePort; p != 0 && (p < 30000 || p > 32767) {
 			return fmt.Errorf("clusters[%d] (%s): addons.cilium.hubble_ui_node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if spec.Addons.Jaeger.Enabled && !spec.Addons.Istio.Enabled {
+			return fmt.Errorf("clusters[%d] (%s): addons.jaeger.enabled requires addons.istio.enabled", i, spec.Name)
+		}
+		if p := spec.Addons.Jaeger.NodePort; p != 0 && (p < 30000 || p > 32767) {
+			return fmt.Errorf("clusters[%d] (%s): addons.jaeger.node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if p := spec.Addons.Kiali.NodePort; p != 0 && (p < 30000 || p > 32767) {
+			return fmt.Errorf("clusters[%d] (%s): addons.kiali.node_port must be 0 or in range 30000–32767", i, spec.Name)
 		}
 		if spec.Addons.NFS.Enabled && spec.Addons.NFS.DataDir != "" && !strings.HasPrefix(spec.Addons.NFS.DataDir, "/") {
 			return fmt.Errorf("clusters[%d] (%s): addons.nfs.data_dir must be an absolute path", i, spec.Name)

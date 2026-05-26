@@ -200,6 +200,12 @@ func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Cli
 				st.spec.Addons.Monitoring.GrafanaNodePort,
 			)
 		}
+		if st.spec.Addons.Istio.Enabled {
+			ui.Info(out, "  %s  Kiali :%d", st.spec.Name, st.spec.Addons.Kiali.NodePort)
+			if st.spec.Addons.Jaeger.Enabled {
+				ui.Info(out, "  %s  Jaeger :%d", st.spec.Name, st.spec.Addons.Jaeger.NodePort)
+			}
+		}
 	}
 	return states, nil
 }
@@ -459,6 +465,14 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 			if err := addons.InstallIstioMonitors(runner, st.spec.Name, out); err != nil {
 				return err
 			}
+		}
+		if st.spec.Addons.Jaeger.Enabled {
+			if err := addons.InstallJaeger(runner, st.spec.Addons.Jaeger, st.spec.Name, out); err != nil {
+				return err
+			}
+		}
+		if err := addons.InstallKiali(runner, st.spec.Addons.Kiali, st.spec.Addons.Jaeger.Enabled, st.spec.Name, out); err != nil {
+			return err
 		}
 	}
 

@@ -127,6 +127,11 @@ clusters:
       #   enabled: false
       #   # version: "1.25.2"
       #   # gateway_api_version: "v1.3.0"  # omit to auto-resolve latest stable
+      # jaeger:
+      #   enabled: true             # requires istio.enabled: true
+      #   node_port: 30002
+      # kiali:                      # auto-installed with Istio; configure overrides here
+      #   node_port: 30001
 
       # Pull-through registry — references a pre-existing Harbor instance
       registry:
@@ -196,6 +201,20 @@ clusters:
         enabled: true
         # version: "1.25.2"
         # gateway_api_version: "v1.3.0"
+
+      # Jaeger all-in-one tracing (requires istio.enabled: true)
+      # Deployed into the observability namespace.
+      jaeger:
+        enabled: true
+        # version: "1.53"
+        node_port: 30002          # UI on port 16686
+
+      # Kiali service mesh console — installed automatically when istio is enabled.
+      # Configure node_port/version here if you need non-default values.
+      kiali:
+        # version: "v2.8"
+        node_port: 30001          # UI on port 20001
+        # signing_key: "proxmox-k3s-kiali"
 
       registry:
         hostname: 192.168.1.50
