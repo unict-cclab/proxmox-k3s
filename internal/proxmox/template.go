@@ -164,8 +164,8 @@ func prepareTemplateGuest(ctx context.Context, vm *pxapi.VirtualMachine, tmpl co
 		return fmt.Errorf("waiting for cloud-init in template VM: %w", err)
 	}
 
-	ui.Step(out, "[template] upgrading packages and installing qemu-guest-agent...")
-	if err := runner.Run("sudo env DEBIAN_FRONTEND=noninteractive apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y install qemu-guest-agent && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y autoremove && sudo apt-get clean", out); err != nil {
+	ui.Step(out, "[template] upgrading packages and installing qemu-guest-agent and nfs-common...")
+	if err := runner.Run("sudo env DEBIAN_FRONTEND=noninteractive apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y install qemu-guest-agent nfs-common && sudo env DEBIAN_FRONTEND=noninteractive apt-get -y autoremove && sudo apt-get clean", out); err != nil {
 		return fmt.Errorf("updating packages in template VM: %w", err)
 	}
 
