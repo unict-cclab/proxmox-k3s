@@ -146,6 +146,18 @@ clusters:
         data_dir: /data/nfs
         # export_subnet: "*"
 
+      # Chaos Mesh — fault injection testing
+      # chaos_mesh:
+      #   enabled: true
+      #   # version: "2.7.1"
+      #   dashboard_node_port: 32300
+
+      # Mentat — inter-node network latency measurement (DaemonSet + Prometheus metrics)
+      # mentat:
+      #   enabled: true
+      #   # version: "v0.1.0"
+      #   # sleep_seconds: 5
+
     control_plane:
       - name: cp-01
         template: ubuntu-24.04-template

@@ -33,6 +33,12 @@ spec:
     - name: binary-thrift
       port: 14267
       targetPort: 14267
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
     - name: ui
       port: 16686
       targetPort: 16686
@@ -93,6 +99,8 @@ spec:
         - containerPort: 5778
         - containerPort: 14268
         - containerPort: 14267
+        - containerPort: 4317
+        - containerPort: 4318
         - containerPort: 16686
         - containerPort: 5775
           protocol: UDP

@@ -206,6 +206,9 @@ func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Cli
 				ui.Info(out, "  %s  Jaeger :%d", st.spec.Name, st.spec.Addons.Jaeger.NodePort)
 			}
 		}
+		if st.spec.Addons.ChaosMesh.Enabled {
+			ui.Info(out, "  %s  Chaos Mesh dashboard :%d", st.spec.Name, st.spec.Addons.ChaosMesh.DashboardNodePort)
+		}
 	}
 	return states, nil
 }
@@ -489,6 +492,18 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 			return err
 		}
 		if err := addons.InstallNFSCSI(runner, st.spec.Addons.NFS.Server, st.spec.Name, st.spec.Addons.NFS.DataDir, st.spec.Addons.NFS, out); err != nil {
+			return err
+		}
+	}
+
+	if st.spec.Addons.ChaosMesh.Enabled {
+		if err := addons.InstallChaosMesh(runner, st.spec.Addons.ChaosMesh, st.spec.Name, out); err != nil {
+			return err
+		}
+	}
+
+	if st.spec.Addons.Mentat.Enabled {
+		if err := addons.InstallMentat(runner, st.spec.Addons.Mentat, st.spec.Name, st.spec.Addons.Monitoring.Enabled, out); err != nil {
 			return err
 		}
 	}

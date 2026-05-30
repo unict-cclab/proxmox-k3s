@@ -93,6 +93,36 @@ func TestTaskLogSummaryUsesRecentNonEmptyLines(t *testing.T) {
 	}
 }
 
+func TestCloneOptionsStorageOverride(t *testing.T) {
+	t.Parallel()
+
+	opts := cloneOptions(VMSpec{
+		Name:        "worker-01",
+		ProxmoxNode: "pve",
+		Storage:     "fast-ssd",
+	}, 8101)
+
+	if opts.Storage != "fast-ssd" {
+		t.Fatalf("expected storage override, got %q", opts.Storage)
+	}
+	if opts.NewID != 8101 || opts.Name != "worker-01" || opts.Target != "pve" || opts.Full != 1 {
+		t.Fatalf("unexpected clone options: %+v", opts)
+	}
+}
+
+func TestCloneOptionsOmitsStorageWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	opts := cloneOptions(VMSpec{
+		Name:        "worker-01",
+		ProxmoxNode: "pve",
+	}, 8101)
+
+	if opts.Storage != "" {
+		t.Fatalf("expected empty storage to let Proxmox use clone defaults, got %q", opts.Storage)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

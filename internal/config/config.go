@@ -79,6 +79,8 @@ type ClusterAddons struct {
 	Jaeger     JaegerConfig        `yaml:"jaeger"`
 	Kiali      KialiConfig         `yaml:"kiali"`
 	NFS        NFSAddonConfig      `yaml:"nfs"`
+	ChaosMesh  ChaosMeshConfig     `yaml:"chaos_mesh"`
+	Mentat     MentatConfig        `yaml:"mentat"`
 	Registry   *ClusterRegistryRef `yaml:"registry,omitempty"`
 }
 
@@ -128,7 +130,7 @@ type JaegerConfig struct {
 type KialiConfig struct {
 	Version    string `yaml:"version"`     // image tag, default "v2.8"
 	NodePort   int    `yaml:"node_port"`   // NodePort for UI (port 20001), default 30001
-	SigningKey  string `yaml:"signing_key"` // JWT signing key, default "proxmox-k3s-kiali"
+	SigningKey string `yaml:"signing_key"` // JWT signing key, default "proxmox-k3s-kiali"
 }
 
 // ClusterMeshEntry assigns a Cilium cluster ID to a named cluster that
@@ -144,6 +146,22 @@ type NFSConfig struct {
 	VM           CPNode `yaml:"vm"`
 	DataDir      string `yaml:"data_dir"`
 	ExportSubnet string `yaml:"export_subnet"`
+}
+
+// ChaosMeshConfig configures Chaos Mesh installation per cluster.
+// Set enabled: true to install Chaos Mesh for fault injection testing.
+type ChaosMeshConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	Version           string `yaml:"version"`
+	DashboardNodePort int    `yaml:"dashboard_node_port"` // NodePort for the dashboard (port 2333), default 32300
+}
+
+// MentatConfig configures the mentat network-latency DaemonSet per cluster.
+// Set enabled: true to deploy mentat into the observability namespace.
+type MentatConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	Version      string `yaml:"version"`       // image tag, default "v0.1.0"
+	SleepSeconds int    `yaml:"sleep_seconds"` // probe interval in seconds, default 5
 }
 
 // NFSAddonConfig controls the NFS CSI driver installation for a cluster.
@@ -378,6 +396,9 @@ func (c *Config) applyMultiDefaults() {
 		defaultNFSCSIVersion     = "v4.9.0"
 		defaultNFSDataDir        = "/data/nfs"
 		defaultNFSExportSubnet   = "*"
+		defaultChaosMeshVersion  = "2.7.1"
+		defaultMentatVersion     = "v0.1.0"
+		defaultMentatSleep       = 5
 	)
 
 	if n := c.NFS; n != nil {
@@ -476,6 +497,22 @@ func (c *Config) applyMultiDefaults() {
 		if spec.Addons.NFS.Enabled && spec.Addons.NFS.ExportSubnet == "" {
 			spec.Addons.NFS.ExportSubnet = defaultNFSExportSubnet
 		}
+		if spec.Addons.ChaosMesh.Enabled {
+			if spec.Addons.ChaosMesh.Version == "" {
+				spec.Addons.ChaosMesh.Version = defaultChaosMeshVersion
+			}
+			if spec.Addons.ChaosMesh.DashboardNodePort == 0 {
+				spec.Addons.ChaosMesh.DashboardNodePort = 32300
+			}
+		}
+		if spec.Addons.Mentat.Enabled {
+			if spec.Addons.Mentat.Version == "" {
+				spec.Addons.Mentat.Version = defaultMentatVersion
+			}
+			if spec.Addons.Mentat.SleepSeconds == 0 {
+				spec.Addons.Mentat.SleepSeconds = defaultMentatSleep
+			}
+		}
 		if spec.Addons.Registry != nil && spec.Addons.Registry.HTTPPort == 0 {
 			spec.Addons.Registry.HTTPPort = 80
 		}
@@ -500,9 +537,6 @@ func (c *Config) applyMultiDefaults() {
 }
 
 func applyNodeDefaults(node *CPNode) {
-	if node.Storage == "" {
-		node.Storage = "local-lvm"
-	}
 	if node.Bridge == "" {
 		node.Bridge = "vmbr0"
 	}
@@ -618,6 +652,9 @@ func (c *Config) validateClusters() error {
 		}
 		if p := spec.Addons.Kiali.NodePort; p != 0 && (p < 30000 || p > 32767) {
 			return fmt.Errorf("clusters[%d] (%s): addons.kiali.node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if p := spec.Addons.ChaosMesh.DashboardNodePort; p != 0 && (p < 30000 || p > 32767) {
+			return fmt.Errorf("clusters[%d] (%s): addons.chaos_mesh.dashboard_node_port must be 0 or in range 30000–32767", i, spec.Name)
 		}
 		if spec.Addons.NFS.Enabled && spec.Addons.NFS.DataDir != "" && !strings.HasPrefix(spec.Addons.NFS.DataDir, "/") {
 			return fmt.Errorf("clusters[%d] (%s): addons.nfs.data_dir must be an absolute path", i, spec.Name)

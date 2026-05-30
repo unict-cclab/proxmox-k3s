@@ -85,12 +85,7 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		vmid := nextVMIDStart
 
 		ui.Step(out, "cloning %s (VMID %d) from template...", spec.Name, vmid)
-		_, cloneTask, err := tmpl.Clone(ctx, &pxapi.VirtualMachineCloneOptions{
-			NewID:  vmid,
-			Name:   spec.Name,
-			Full:   1, // full clone
-			Target: spec.ProxmoxNode,
-		})
+		_, cloneTask, err := tmpl.Clone(ctx, cloneOptions(spec, vmid))
 		if err != nil {
 			return nil, fmt.Errorf("cloning template for %s: %w", spec.Name, err)
 		}
@@ -174,6 +169,16 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 	}
 
 	return nil, fmt.Errorf("creating %s: exhausted VMID retries due to cloud-init volume conflicts", spec.Name)
+}
+
+func cloneOptions(spec VMSpec, vmid int) *pxapi.VirtualMachineCloneOptions {
+	return &pxapi.VirtualMachineCloneOptions{
+		NewID:   vmid,
+		Name:    spec.Name,
+		Full:    1, // full clone
+		Storage: spec.Storage,
+		Target:  spec.ProxmoxNode,
+	}
 }
 
 func WaitForIP(ctx context.Context, vm *pxapi.VirtualMachine, timeout time.Duration) (string, error) {
