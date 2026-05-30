@@ -390,7 +390,7 @@ func (c *Config) applyMultiDefaults() {
 	const (
 		defaultCiliumVersion     = "1.19.4"
 		defaultMonitoringVersion = "84.5.0"
-		defaultIstioVersion      = "1.25.2"
+		defaultIstioVersion      = "1.30.0"
 		defaultJaegerVersion     = "1.53"
 		defaultKialiVersion      = "v2.8"
 		defaultNFSCSIVersion     = "v4.9.0"

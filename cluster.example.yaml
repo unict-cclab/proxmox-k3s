@@ -125,7 +125,7 @@ clusters:
       # enable on clusters that use flannel instead
       # istio:
       #   enabled: false
-      #   # version: "1.25.2"
+      #   # version: "1.30.0"
       #   # gateway_api_version: "v1.3.0"  # omit to auto-resolve latest stable
       # jaeger:
       #   enabled: true             # requires istio.enabled: true
@@ -211,7 +211,7 @@ clusters:
 
       istio:
         enabled: true
-        # version: "1.25.2"
+        # version: "1.30.0"
         # gateway_api_version: "v1.3.0"
 
       # Jaeger all-in-one tracing (requires istio.enabled: true)
