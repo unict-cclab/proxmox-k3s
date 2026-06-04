@@ -461,7 +461,7 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 	}
 
 	if st.spec.Addons.Istio.Enabled {
-		if err := addons.InstallIstio(runner, st.spec.Addons.Istio, st.spec.Name, out); err != nil {
+		if err := addons.InstallIstio(runner, st.spec.Addons.Istio, st.spec.Addons.Jaeger.Enabled, st.spec.Name, out); err != nil {
 			return err
 		}
 		if st.spec.Addons.Monitoring.Enabled {
@@ -471,6 +471,9 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 		}
 		if st.spec.Addons.Jaeger.Enabled {
 			if err := addons.InstallJaeger(runner, st.spec.Addons.Jaeger, st.spec.Name, out); err != nil {
+				return err
+			}
+			if err := addons.InstallIstioJaegerTelemetry(runner, st.spec.Name, out); err != nil {
 				return err
 			}
 		}

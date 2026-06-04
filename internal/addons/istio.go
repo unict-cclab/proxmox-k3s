@@ -18,8 +18,10 @@ const (
 	gatewayAPICRDURLTemplate = "https://github.com/kubernetes-sigs/gateway-api/releases/download/%s/standard-install.yaml"
 )
 
-// istiodValuesTemplate is the Helm values for the istiod control plane chart.
-const istiodValuesTemplate = `affinity:
+const jaegerTracingProviderName = "jaeger"
+
+// istiodBaseValues is the Helm values for the istiod control plane chart.
+const istiodBaseValues = `affinity:
   nodeAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
     - weight: 100
@@ -34,6 +36,27 @@ tolerations:
   operator: "Equal"
   value: "management"
   effect: "NoSchedule"
+`
+
+const istiodJaegerTracingValues = `meshConfig:
+  enableTracing: true
+  extensionProviders:
+  - name: jaeger
+    opentelemetry:
+      service: jaeger.observability.svc.cluster.local
+      port: 4317
+`
+
+const istioJaegerTelemetryManifest = `apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-default
+  namespace: istio-system
+spec:
+  tracing:
+  - providers:
+    - name: jaeger
+    randomSamplingPercentage: 100.00
 `
 
 // istioMonitorManifest contains the PodMonitor for Envoy sidecar proxies and the
@@ -133,7 +156,7 @@ func LatestGatewayAPIVersion(ctx context.Context) (string, error) {
 }
 
 // InstallIstio installs Gateway API CRDs then Istio via Helm: istio/base (CRDs) then istio/istiod (control plane).
-func InstallIstio(runner *util.Runner, istio config.IstioConfig, clusterName string, out io.Writer) error {
+func InstallIstio(runner *util.Runner, istio config.IstioConfig, jaegerEnabled bool, clusterName string, out io.Writer) error {
 	gwVersion := istio.GatewayAPIVersion
 	if gwVersion == "" {
 		var err error
@@ -165,11 +188,28 @@ func InstallIstio(runner *util.Runner, istio config.IstioConfig, clusterName str
 	// affinity and tolerations are root-level values in the istiod chart (no pilot: wrapper).
 	ui.Step(out, "[%s] installing istiod %s...", clusterName, istio.Version)
 	istiodChart := fmt.Sprintf("istio/istiod --version %s", istio.Version)
-	if err := helmInstall(runner, "istiod", istiodChart, istioNamespace, istiodValuesTemplate, "", out); err != nil {
+	istiodValues := istiodBaseValues
+	if jaegerEnabled {
+		istiodValues += istiodJaegerTracingValues
+	}
+	if err := helmInstall(runner, "istiod", istiodChart, istioNamespace, istiodValues, "", out); err != nil {
 		return fmt.Errorf("[%s] istiod: %w", clusterName, err)
 	}
 
 	ui.Success(out, "[%s] Istio %s ready", clusterName, istio.Version)
+	return nil
+}
+
+// InstallIstioJaegerTelemetry enables mesh-wide trace reporting to the Jaeger provider.
+func InstallIstioJaegerTelemetry(runner *util.Runner, clusterName string, out io.Writer) error {
+	ui.Step(out, "[%s] enabling Istio tracing to Jaeger...", clusterName)
+	if err := runner.WriteFile("/tmp/istio-jaeger-telemetry.yaml", []byte(istioJaegerTelemetryManifest)); err != nil {
+		return fmt.Errorf("[%s] writing Istio Jaeger telemetry manifest: %w", clusterName, err)
+	}
+	if err := runner.Run("kubectl apply -f /tmp/istio-jaeger-telemetry.yaml", out); err != nil {
+		return fmt.Errorf("[%s] applying Istio Jaeger telemetry: %w", clusterName, err)
+	}
+	ui.Success(out, "[%s] Istio tracing provider %q ready", clusterName, jaegerTracingProviderName)
 	return nil
 }
 
