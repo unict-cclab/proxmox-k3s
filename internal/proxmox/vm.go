@@ -87,9 +87,27 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		ui.Step(out, "cloning %s (VMID %d) from template...", spec.Name, vmid)
 		_, cloneTask, err := tmpl.Clone(ctx, cloneOptions(spec, vmid))
 		if err != nil {
+			if isVMIDConflict(err) && attempt < cloudInitRetries-1 {
+				nextVMID, allocErr := c.NextVMID(ctx, vmid+1)
+				if allocErr != nil {
+					return nil, fmt.Errorf("allocating replacement VMID for %s: %w", spec.Name, allocErr)
+				}
+				ui.Warn(out, "VMID %d is no longer available, retrying %s with VMID %d...", vmid, spec.Name, nextVMID)
+				nextVMIDStart = nextVMID
+				continue
+			}
 			return nil, fmt.Errorf("cloning template for %s: %w", spec.Name, err)
 		}
 		if err := waitForTaskOK(ctx, cloneTask, cloneTaskTimeout); err != nil {
+			if isVMIDConflict(err) && attempt < cloudInitRetries-1 {
+				nextVMID, allocErr := c.NextVMID(ctx, vmid+1)
+				if allocErr != nil {
+					return nil, fmt.Errorf("allocating replacement VMID for %s: %w", spec.Name, allocErr)
+				}
+				ui.Warn(out, "VMID %d is no longer available, retrying %s with VMID %d...", vmid, spec.Name, nextVMID)
+				nextVMIDStart = nextVMID
+				continue
+			}
 			return nil, fmt.Errorf("waiting for clone of %s: %w", spec.Name, err)
 		}
 
@@ -130,7 +148,11 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 				if cleanupErr := cleanupFailedVM(ctx, vm, out); cleanupErr != nil {
 					ui.Warn(out, "cleanup of failed VM %d: %v", vmid, cleanupErr)
 				}
-				nextVMIDStart = vmid + 1
+				nextVMID, allocErr := c.NextVMID(ctx, vmid+1)
+				if allocErr != nil {
+					return nil, fmt.Errorf("allocating replacement VMID for %s: %w", spec.Name, allocErr)
+				}
+				nextVMIDStart = nextVMID
 				continue
 			}
 			return nil, fmt.Errorf("waiting for config of %s: %w", spec.Name, err)
@@ -268,6 +290,13 @@ func encodeConfigBody(values map[string]string) string {
 func isCloudInitVolumeConflict(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "cloudinit") && strings.Contains(msg, "File exists")
+}
+
+func isVMIDConflict(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "file exists") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "vmid") && strings.Contains(msg, "exists")
 }
 
 func cleanupFailedVM(ctx context.Context, vm *pxapi.VirtualMachine, out io.Writer) error {

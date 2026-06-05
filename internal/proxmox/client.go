@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	pxapi "github.com/luthermonson/go-proxmox"
 
@@ -15,9 +16,11 @@ import (
 )
 
 type Client struct {
-	api        *pxapi.Client
-	cfg        *config.Config
-	httpClient *http.Client
+	api          *pxapi.Client
+	cfg          *config.Config
+	httpClient   *http.Client
+	vmidMu       sync.Mutex
+	reservedVMID map[int]bool
 }
 
 func New(cfg *config.Config) (*Client, error) {
@@ -39,7 +42,7 @@ func New(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("connecting to Proxmox at %s: %w", cfg.Proxmox.APIURL, err)
 	}
 
-	return &Client{api: api, cfg: cfg, httpClient: httpClient}, nil
+	return &Client{api: api, cfg: cfg, httpClient: httpClient, reservedVMID: make(map[int]bool)}, nil
 }
 
 // ConfigVM posts a VM config update via raw HTTP because go-proxmox does not
@@ -89,12 +92,33 @@ func (c *Client) Node(ctx context.Context, name string) (*pxapi.Node, error) {
 }
 
 func (c *Client) NextVMID(ctx context.Context, startFrom int) (int, error) {
+	ids, err := c.NextVMIDs(ctx, startFrom, 1)
+	if err != nil {
+		return 0, err
+	}
+	return ids[0], nil
+}
+
+func (c *Client) NextVMIDs(ctx context.Context, startFrom, count int) ([]int, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+
+	c.vmidMu.Lock()
+	defer c.vmidMu.Unlock()
+	if c.reservedVMID == nil {
+		c.reservedVMID = make(map[int]bool)
+	}
+
 	nodes, err := c.api.Nodes(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("listing nodes: %w", err)
+		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
 
 	used := make(map[int]bool)
+	for id := range c.reservedVMID {
+		used[id] = true
+	}
 	for _, nodeStatus := range nodes {
 		node, err := c.api.Node(ctx, nodeStatus.Node)
 		if err != nil {
@@ -109,9 +133,16 @@ func (c *Client) NextVMID(ctx context.Context, startFrom int) (int, error) {
 		}
 	}
 
+	ids := make([]int, 0, count)
 	for id := startFrom; ; id++ {
 		if !used[id] {
-			return id, nil
+			ids = append(ids, id)
+			if len(ids) == count {
+				for _, reserved := range ids {
+					c.reservedVMID[reserved] = true
+				}
+				return ids, nil
+			}
 		}
 	}
 }

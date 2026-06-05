@@ -75,6 +75,7 @@ type ClusterSpec struct {
 type ClusterAddons struct {
 	Cilium     CiliumConfig        `yaml:"cilium"`
 	Monitoring MonitoringConfig    `yaml:"monitoring"`
+	Logging    LoggingConfig       `yaml:"logging"`
 	Istio      IstioConfig         `yaml:"istio"`
 	Jaeger     JaegerConfig        `yaml:"jaeger"`
 	Kiali      KialiConfig         `yaml:"kiali"`
@@ -96,7 +97,7 @@ type ClusterRegistryRef struct {
 type CiliumConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	Version          string `yaml:"version"`
-	HubbleUINodePort int    `yaml:"hubble_ui_node_port"`
+	HubbleUINodePort int    `yaml:"hubble_ui_node_port"` // NodePort for Hubble UI, default 32080
 }
 
 // MonitoringConfig configures the kube-prometheus-stack installation.
@@ -107,6 +108,17 @@ type MonitoringConfig struct {
 	PrometheusNodePort   int    `yaml:"prometheus_node_port"`
 	GrafanaNodePort      int    `yaml:"grafana_node_port"`
 	GrafanaAdminPassword string `yaml:"grafana_admin_password"`
+}
+
+// LoggingConfig configures Loki and Alloy for Kubernetes event logging.
+// Set enabled: true to collect HPA scaling events and expose Loki via NodePort.
+type LoggingConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	LokiVersion  string `yaml:"loki_version"`   // Helm chart version, default "6.41.1"
+	AlloyVersion string `yaml:"alloy_version"`  // Helm chart version, default "1.4.0"
+	LokiNodePort int    `yaml:"loki_node_port"` // NodePort for Loki gateway/API, default 32099
+	Retention    string `yaml:"retention"`      // Loki retention period, default "30d"
+	StorageSize  string `yaml:"storage_size"`   // Loki PVC size, default "10Gi"
 }
 
 // IstioConfig configures Istio service mesh installation per cluster.
@@ -390,6 +402,8 @@ func (c *Config) applyMultiDefaults() {
 	const (
 		defaultCiliumVersion     = "1.19.4"
 		defaultMonitoringVersion = "84.5.0"
+		defaultLokiVersion       = "6.41.1"
+		defaultAlloyVersion      = "1.4.0"
 		defaultIstioVersion      = "1.30.0"
 		defaultJaegerVersion     = "1.53"
 		defaultKialiVersion      = "v2.8"
@@ -463,8 +477,28 @@ func (c *Config) applyMultiDefaults() {
 		if spec.Addons.Cilium.Enabled && spec.Addons.Cilium.Version == "" {
 			spec.Addons.Cilium.Version = defaultCiliumVersion
 		}
+		if spec.Addons.Cilium.Enabled && spec.Addons.Cilium.HubbleUINodePort == 0 {
+			spec.Addons.Cilium.HubbleUINodePort = 32080
+		}
 		if spec.Addons.Monitoring.Enabled && spec.Addons.Monitoring.Version == "" {
 			spec.Addons.Monitoring.Version = defaultMonitoringVersion
+		}
+		if spec.Addons.Logging.Enabled {
+			if spec.Addons.Logging.LokiVersion == "" {
+				spec.Addons.Logging.LokiVersion = defaultLokiVersion
+			}
+			if spec.Addons.Logging.AlloyVersion == "" {
+				spec.Addons.Logging.AlloyVersion = defaultAlloyVersion
+			}
+			if spec.Addons.Logging.LokiNodePort == 0 {
+				spec.Addons.Logging.LokiNodePort = 32099
+			}
+			if spec.Addons.Logging.Retention == "" {
+				spec.Addons.Logging.Retention = "30d"
+			}
+			if spec.Addons.Logging.StorageSize == "" {
+				spec.Addons.Logging.StorageSize = "10Gi"
+			}
 		}
 		if spec.Addons.Istio.Enabled && spec.Addons.Istio.Version == "" {
 			spec.Addons.Istio.Version = defaultIstioVersion
@@ -655,6 +689,9 @@ func (c *Config) validateClusters() error {
 		}
 		if p := spec.Addons.ChaosMesh.DashboardNodePort; p != 0 && (p < 30000 || p > 32767) {
 			return fmt.Errorf("clusters[%d] (%s): addons.chaos_mesh.dashboard_node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if p := spec.Addons.Logging.LokiNodePort; p != 0 && (p < 30000 || p > 32767) {
+			return fmt.Errorf("clusters[%d] (%s): addons.logging.loki_node_port must be 0 or in range 30000–32767", i, spec.Name)
 		}
 		if spec.Addons.NFS.Enabled && spec.Addons.NFS.DataDir != "" && !strings.HasPrefix(spec.Addons.NFS.DataDir, "/") {
 			return fmt.Errorf("clusters[%d] (%s): addons.nfs.data_dir must be an absolute path", i, spec.Name)

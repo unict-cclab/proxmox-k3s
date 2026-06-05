@@ -13,6 +13,8 @@ Provision and manage k3s clusters on Proxmox VE with a single CLI and a single Y
 - [Quick Start](#quick-start)
 - [Commands](#commands)
 - [Working with pre-existing infrastructure](#working-with-pre-existing-infrastructure)
+- [HPA scaling event logs](#hpa-scaling-event-logs)
+- [Addon access ports](#addon-access-ports)
 - [Configuration](#configuration)
 - [Development](#development)
 - [Contributing](#contributing)
@@ -27,7 +29,7 @@ Provision and manage k3s clusters on Proxmox VE with a single CLI and a single Y
 - **Static IP or DHCP** — configurable per node, per-node template override
 - **Flexible cloud images** — Ubuntu 24.04/22.04, Debian 12, or any custom image URL
 - **Worker customisation** — per-node Kubernetes labels and taints applied at join time
-- **Optional addons** — Cilium CNI, Hubble UI, kube-prometheus-stack, Istio, Harbor registry, NFS CSI driver
+- **Optional addons** — Cilium CNI, Hubble UI, kube-prometheus-stack, Loki + Alloy logging, Istio, Harbor registry, NFS CSI driver
 - **Cross-platform** — Linux, macOS, and Windows binaries published with every release
 
 ## Install
@@ -48,7 +50,7 @@ Choose the archive for your platform, extract it, and place `proxmox-k3s` somewh
 Copy the example config and edit it:
 
 ```bash
-cp examples/clusters.yaml cluster.yaml
+cp cluster.example.yaml cluster.yaml
 vi cluster.yaml
 ```
 
@@ -114,6 +116,9 @@ If you already have a template, a Harbor registry, and/or an NFS server provisio
 clusters:
   - name: my-cluster
     addons:
+      logging:
+        enabled: true
+        loki_node_port: 32099
       registry:
         hostname: 192.168.1.50   # pre-existing Harbor IP
         http_port: 80
@@ -145,12 +150,38 @@ chmod 600 ~/.proxmox-k3s/id_ed25519
 
 Or set `ssh_key_path` in the config to point to your key directly.
 
+## HPA scaling event logs
+
+Enable `addons.logging` to install Loki and Alloy in the `observability` namespace. Alloy watches Kubernetes events, keeps HPA rescale events, and pushes them to Loki. Loki is exposed through the configured NodePort, so external tools can query:
+
+```bash
+curl "http://<node-ip>:32099/loki/api/v1/query_range?query={job=\"kubernetes-events\"}%20|%20json"
+```
+
+## Addon access ports
+
+Most addon UIs and APIs are exposed with Kubernetes NodePorts, so they are reachable at `http://<node-ip>:<node-port>` from any cluster node IP.
+
+| Addon | Service | Config key | Default | URL |
+|------|---------|------------|---------|-----|
+| Cilium | Hubble UI | `addons.cilium.hubble_ui_node_port` | `32080` | `http://<node-ip>:32080` |
+| Cilium cluster mesh | ClusterMesh API | Not configurable | `32379` when cluster mesh is enabled | Internal Cilium mesh access |
+| Monitoring | Prometheus | `addons.monitoring.prometheus_node_port` | `32090` | `http://<node-ip>:32090` |
+| Monitoring | Grafana | `addons.monitoring.grafana_node_port` | `32000` | `http://<node-ip>:32000` |
+| Logging | Loki API | `addons.logging.loki_node_port` | `32099` | `http://<node-ip>:32099` |
+| Istio tracing | Jaeger UI | `addons.jaeger.node_port` | `30002` | `http://<node-ip>:30002` |
+| Istio console | Kiali UI | `addons.kiali.node_port` | `30001` | `http://<node-ip>:30001` |
+| Chaos Mesh | Dashboard | `addons.chaos_mesh.dashboard_node_port` | `32300` | `http://<node-ip>:32300` |
+
+Harbor and NFS are provisioned as separate infrastructure VMs rather than Kubernetes NodePort services. Mentat exposes Prometheus metrics inside the cluster and is scraped automatically when monitoring is enabled.
+
 ## Configuration
 
 | File | Purpose |
 |------|---------|
 | [examples/shared.yaml](examples/shared.yaml) | Infra provisioning: template, Harbor registry, NFS server |
-| [examples/clusters.yaml](examples/clusters.yaml) | Cluster provisioning: two clusters + Cilium mesh |
+| [cluster.example.yaml](cluster.example.yaml) | Full multi-cluster provisioning example with addons |
+| [examples/single-cluster.yaml](examples/single-cluster.yaml) | Minimal single-cluster provisioning example |
 
 Infra-only commands (`template`, `registry`, `nfs`) only need the `proxmox`, `template`, `registry`, and `nfs` top-level sections — no `clusters` block required.
 

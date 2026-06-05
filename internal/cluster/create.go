@@ -128,16 +128,19 @@ func Create(ctx context.Context, cfg *config.Config, out io.Writer) error {
 // installs addons, and connects the mesh when all mesh clusters are present.
 // The caller is responsible for ensuring templates exist before calling.
 func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Client, keyPath string, out io.Writer) ([]*clusterState, error) {
-	// Pre-allocate VMID ranges sequentially to avoid races during parallel creation.
+	// Pre-allocate explicit VMIDs sequentially to avoid races during parallel creation.
 	nextVMID := cfg.Template.VMIDBase + 1
-	vmidBases := make([]int, len(cfg.Clusters))
+	vmidSets := make([][]int, len(cfg.Clusters))
 	for i, spec := range cfg.Clusters {
-		base, err := px.NextVMID(ctx, nextVMID)
+		count := len(spec.ControlPlane) + len(spec.Workers)
+		ids, err := px.NextVMIDs(ctx, nextVMID, count)
 		if err != nil {
 			return nil, fmt.Errorf("allocating VMIDs for cluster %s: %w", spec.Name, err)
 		}
-		vmidBases[i] = base
-		nextVMID = base + len(spec.ControlPlane) + len(spec.Workers)
+		vmidSets[i] = ids
+		if len(ids) > 0 {
+			nextVMID = ids[len(ids)-1] + 1
+		}
 	}
 
 	states := make([]*clusterState, len(cfg.Clusters))
@@ -154,7 +157,7 @@ func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Cli
 				registryEndpoint = fmt.Sprintf("http://%s:%d", spec.Addons.Registry.Hostname, spec.Addons.Registry.HTTPPort)
 			}
 
-			if err := createSingle(gctx, clusterCfg, vmidBases[i], registryEndpoint, pw); err != nil {
+			if err := createSingle(gctx, px, clusterCfg, vmidSets[i], registryEndpoint, pw); err != nil {
 				return fmt.Errorf("cluster %s: %w", spec.Name, err)
 			}
 
@@ -460,6 +463,12 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 		}
 	}
 
+	if st.spec.Addons.Logging.Enabled {
+		if err := addons.InstallLogging(runner, st.spec.Addons.Logging, st.spec.Name, out); err != nil {
+			return err
+		}
+	}
+
 	if st.spec.Addons.Istio.Enabled {
 		if err := addons.InstallIstio(runner, st.spec.Addons.Istio, st.spec.Addons.Jaeger.Enabled, st.spec.Name, out); err != nil {
 			return err
@@ -557,7 +566,12 @@ func connectMesh(cfg *config.Config, states []*clusterState, out io.Writer) erro
 }
 
 // createSingle provisions VMs and installs k3s for one cluster.
-func createSingle(ctx context.Context, cfg *config.Config, vmidBase int, registryEndpoint string, out io.Writer) error {
+func createSingle(ctx context.Context, px *pxclient.Client, cfg *config.Config, vmids []int, registryEndpoint string, out io.Writer) error {
+	expectedVMIDs := len(cfg.ControlPlane) + len(cfg.Workers)
+	if len(vmids) != expectedVMIDs {
+		return fmt.Errorf("expected %d preallocated VMIDs for cluster %s, got %d", expectedVMIDs, cfg.ClusterName, len(vmids))
+	}
+
 	keyPath, err := cfg.SSHKeyFilePath()
 	if err != nil {
 		return fmt.Errorf("SSH key path: %w", err)
@@ -570,20 +584,14 @@ func createSingle(ctx context.Context, cfg *config.Config, vmidBase int, registr
 	}
 	ui.Info(out, "private key: %s", keyPair.PrivateKeyPath)
 
-	ui.Section(out, "Connecting to Proxmox")
-	px, err := pxclient.New(cfg)
-	if err != nil {
-		return err
-	}
-
 	ui.Section(out, "Control-plane VMs")
-	cpVMs, err := createControlPlaneVMs(ctx, px, cfg, keyPair.PublicKey, vmidBase, out)
+	cpVMs, err := createControlPlaneVMs(ctx, px, cfg, keyPair.PublicKey, vmids[:len(cfg.ControlPlane)], out)
 	if err != nil {
 		return err
 	}
 
 	ui.Section(out, "Worker VMs")
-	workerVMs, err := createWorkerVMs(ctx, px, cfg, keyPair.PublicKey, vmidBase+len(cfg.ControlPlane), out)
+	workerVMs, err := createWorkerVMs(ctx, px, cfg, keyPair.PublicKey, vmids[len(cfg.ControlPlane):], out)
 	if err != nil {
 		return err
 	}
@@ -627,7 +635,7 @@ func createSingle(ctx context.Context, cfg *config.Config, vmidBase int, registr
 	return nil
 }
 
-func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmidBase int, out io.Writer) ([]*pxclient.VMInfo, error) {
+func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmids []int, out io.Writer) ([]*pxclient.VMInfo, error) {
 	specs := make([]pxclient.VMSpec, 0, len(cfg.ControlPlane))
 	for i, node := range cfg.ControlPlane {
 		templateName := node.Template
@@ -636,7 +644,7 @@ func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config
 		}
 		specs = append(specs, pxclient.VMSpec{
 			TemplateName: templateName,
-			VMID:         vmidBase + i,
+			VMID:         vmids[i],
 			Name:         config.PrefixedNodeName(cfg.ClusterName, node.Name),
 			ProxmoxNode:  node.ProxmoxNode,
 			Cores:        node.Cores,
@@ -662,7 +670,7 @@ func createControlPlaneVMs(ctx context.Context, px *pxclient.Client, cfg *config
 	return vms, nil
 }
 
-func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmidBase int, out io.Writer) ([]*pxclient.VMInfo, error) {
+func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Config, pubKey string, vmids []int, out io.Writer) ([]*pxclient.VMInfo, error) {
 	specs := make([]pxclient.VMSpec, 0, len(cfg.Workers))
 	for i, node := range cfg.Workers {
 		templateName := node.Template
@@ -671,7 +679,7 @@ func createWorkerVMs(ctx context.Context, px *pxclient.Client, cfg *config.Confi
 		}
 		specs = append(specs, pxclient.VMSpec{
 			TemplateName: templateName,
-			VMID:         vmidBase + i,
+			VMID:         vmids[i],
 			Name:         config.PrefixedNodeName(cfg.ClusterName, node.Name),
 			ProxmoxNode:  node.ProxmoxNode,
 			Cores:        node.Cores,
