@@ -173,6 +173,8 @@ Most addon UIs and APIs are exposed with Kubernetes NodePorts, so they are reach
 | Istio console | Kiali UI | `addons.kiali.node_port` | `30001` | `http://<node-ip>:30001` |
 | Chaos Mesh | Dashboard | `addons.chaos_mesh.dashboard_node_port` | `32300` | `http://<node-ip>:32300` |
 
+When monitoring is enabled, Grafana is also provisioned with a `Sophos` folder. It includes an `Application Metrics` dashboard with namespace/group filters, request metrics, p95 response time, replicas, CPU, and memory panels, plus an `Infrastructure Metrics` dashboard with Mentat node latency and node CPU/memory panels. The infrastructure topology panel uses the Business Charts Grafana plugin so node-to-node latency labels stay visible and nodes can be dragged. The application traffic panels use Istio metrics when Istio scraping is enabled.
+
 Harbor and NFS are provisioned as separate infrastructure VMs rather than Kubernetes NodePort services. Mentat exposes Prometheus metrics inside the cluster and is scraped automatically when monitoring is enabled.
 
 ## Configuration

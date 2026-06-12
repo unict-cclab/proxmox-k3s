@@ -74,6 +74,21 @@ backend:
 
 gateway:
   enabled: true
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: nodepool
+            operator: In
+            values:
+            - management
+  tolerations:
+  - key: "nodepool"
+    operator: "Equal"
+    value: "management"
+    effect: "NoSchedule"
   service:
     type: NodePort
     nodePort: %d
@@ -95,6 +110,21 @@ minio:
 const loggingAlloyValuesTemplate = `controller:
   type: deployment
   replicas: 1
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: nodepool
+            operator: In
+            values:
+            - management
+  tolerations:
+  - key: "nodepool"
+    operator: "Equal"
+    value: "management"
+    effect: "NoSchedule"
 
 alloy:
   configMap:
