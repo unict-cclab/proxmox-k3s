@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -73,16 +74,18 @@ type ClusterSpec struct {
 
 // ClusterAddons groups optional per-cluster addon configurations.
 type ClusterAddons struct {
-	Cilium     CiliumConfig        `yaml:"cilium"`
-	Monitoring MonitoringConfig    `yaml:"monitoring"`
-	Logging    LoggingConfig       `yaml:"logging"`
-	Istio      IstioConfig         `yaml:"istio"`
-	Jaeger     JaegerConfig        `yaml:"jaeger"`
-	Kiali      KialiConfig         `yaml:"kiali"`
-	NFS        NFSAddonConfig      `yaml:"nfs"`
-	ChaosMesh  ChaosMeshConfig     `yaml:"chaos_mesh"`
-	Mentat     MentatConfig        `yaml:"mentat"`
-	Registry   *ClusterRegistryRef `yaml:"registry,omitempty"`
+	Cilium      CiliumConfig        `yaml:"cilium"`
+	Monitoring  MonitoringConfig    `yaml:"monitoring"`
+	MonAgent    MonAgentConfig      `yaml:"mon_agent"`
+	ClusterLens ClusterLensConfig   `yaml:"cluster_lens"`
+	Logging     LoggingConfig       `yaml:"logging"`
+	Istio       IstioConfig         `yaml:"istio"`
+	Jaeger      JaegerConfig        `yaml:"jaeger"`
+	Kiali       KialiConfig         `yaml:"kiali"`
+	NFS         NFSAddonConfig      `yaml:"nfs"`
+	ChaosMesh   ChaosMeshConfig     `yaml:"chaos_mesh"`
+	Mentat      MentatConfig        `yaml:"mentat"`
+	Registry    *ClusterRegistryRef `yaml:"registry,omitempty"`
 }
 
 // ClusterRegistryRef references a pre-existing Harbor registry for a cluster.
@@ -108,6 +111,25 @@ type MonitoringConfig struct {
 	PrometheusNodePort   int    `yaml:"prometheus_node_port"`
 	GrafanaNodePort      int    `yaml:"grafana_node_port"`
 	GrafanaAdminPassword string `yaml:"grafana_admin_password"`
+}
+
+// MonAgentConfig configures mon-agent, which annotates nodes and deployments
+// with metrics collected from Prometheus.
+type MonAgentConfig struct {
+	Enabled                bool   `yaml:"enabled"`
+	Version                string `yaml:"version"` // image tag, default "v0.0.3"
+	PrometheusURL          string `yaml:"prometheus_url"`
+	ScrapePeriodSeconds    int    `yaml:"scrape_period_seconds"`
+	PromQLRange            string `yaml:"promql_range"`
+	NamespaceLabelSelector string `yaml:"namespace_label_selector"`
+}
+
+// ClusterLensConfig configures the cluster-lens topology UI.
+type ClusterLensConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Version  string `yaml:"version"`   // image tag, default "latest"
+	NodePort int    `yaml:"node_port"` // NodePort for UI (port 8088), default 32088
+	Refresh  string `yaml:"refresh"`   // frontend polling interval, default "2s"
 }
 
 // LoggingConfig configures Loki and Alloy for Kubernetes event logging.
@@ -400,19 +422,21 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) applyMultiDefaults() {
 	const (
-		defaultCiliumVersion     = "1.19.4"
-		defaultMonitoringVersion = "84.5.0"
-		defaultLokiVersion       = "6.41.1"
-		defaultAlloyVersion      = "1.4.0"
-		defaultIstioVersion      = "1.30.0"
-		defaultJaegerVersion     = "1.53"
-		defaultKialiVersion      = "v2.8"
-		defaultNFSCSIVersion     = "v4.9.0"
-		defaultNFSDataDir        = "/data/nfs"
-		defaultNFSExportSubnet   = "*"
-		defaultChaosMeshVersion  = "2.7.1"
-		defaultMentatVersion     = "v0.1.0"
-		defaultMentatSleep       = 5
+		defaultCiliumVersion      = "1.19.4"
+		defaultMonitoringVersion  = "84.5.0"
+		defaultMonAgentVersion    = "v0.0.3"
+		defaultClusterLensVersion = "latest"
+		defaultLokiVersion        = "6.41.1"
+		defaultAlloyVersion       = "1.4.0"
+		defaultIstioVersion       = "1.30.0"
+		defaultJaegerVersion      = "1.53"
+		defaultKialiVersion       = "v2.8"
+		defaultNFSCSIVersion      = "v4.9.0"
+		defaultNFSDataDir         = "/data/nfs"
+		defaultNFSExportSubnet    = "*"
+		defaultChaosMeshVersion   = "2.7.1"
+		defaultMentatVersion      = "v0.1.0"
+		defaultMentatSleep        = 5
 	)
 
 	if n := c.NFS; n != nil {
@@ -482,6 +506,34 @@ func (c *Config) applyMultiDefaults() {
 		}
 		if spec.Addons.Monitoring.Enabled && spec.Addons.Monitoring.Version == "" {
 			spec.Addons.Monitoring.Version = defaultMonitoringVersion
+		}
+		if spec.Addons.MonAgent.Enabled {
+			if spec.Addons.MonAgent.Version == "" {
+				spec.Addons.MonAgent.Version = defaultMonAgentVersion
+			}
+			if spec.Addons.MonAgent.PrometheusURL == "" {
+				spec.Addons.MonAgent.PrometheusURL = "http://prometheus-stack-kube-prom-prometheus.observability:9090"
+			}
+			if spec.Addons.MonAgent.ScrapePeriodSeconds == 0 {
+				spec.Addons.MonAgent.ScrapePeriodSeconds = 30
+			}
+			if spec.Addons.MonAgent.PromQLRange == "" {
+				spec.Addons.MonAgent.PromQLRange = "5m"
+			}
+			if spec.Addons.MonAgent.NamespaceLabelSelector == "" {
+				spec.Addons.MonAgent.NamespaceLabelSelector = "mon-agent/enabled=true"
+			}
+		}
+		if spec.Addons.ClusterLens.Enabled {
+			if spec.Addons.ClusterLens.Version == "" {
+				spec.Addons.ClusterLens.Version = defaultClusterLensVersion
+			}
+			if spec.Addons.ClusterLens.NodePort == 0 {
+				spec.Addons.ClusterLens.NodePort = 32088
+			}
+			if spec.Addons.ClusterLens.Refresh == "" {
+				spec.Addons.ClusterLens.Refresh = "2s"
+			}
 		}
 		if spec.Addons.Logging.Enabled {
 			if spec.Addons.Logging.LokiVersion == "" {
@@ -692,6 +744,17 @@ func (c *Config) validateClusters() error {
 		}
 		if p := spec.Addons.Logging.LokiNodePort; p != 0 && (p < 30000 || p > 32767) {
 			return fmt.Errorf("clusters[%d] (%s): addons.logging.loki_node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if spec.Addons.MonAgent.Enabled && spec.Addons.MonAgent.ScrapePeriodSeconds <= 0 {
+			return fmt.Errorf("clusters[%d] (%s): addons.mon_agent.scrape_period_seconds must be positive", i, spec.Name)
+		}
+		if p := spec.Addons.ClusterLens.NodePort; p != 0 && (p < 30000 || p > 32767) {
+			return fmt.Errorf("clusters[%d] (%s): addons.cluster_lens.node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if spec.Addons.ClusterLens.Enabled {
+			if _, err := time.ParseDuration(spec.Addons.ClusterLens.Refresh); err != nil {
+				return fmt.Errorf("clusters[%d] (%s): addons.cluster_lens.refresh must be a duration such as 2s or 500ms", i, spec.Name)
+			}
 		}
 		if spec.Addons.NFS.Enabled && spec.Addons.NFS.DataDir != "" && !strings.HasPrefix(spec.Addons.NFS.DataDir, "/") {
 			return fmt.Errorf("clusters[%d] (%s): addons.nfs.data_dir must be an absolute path", i, spec.Name)

@@ -27,15 +27,15 @@ const nfsCSIValuesTemplate = `controller:
             values:
             - management
   tolerations:
-  - key: "nodepool"
+  - key: "ManagementOnly"
     operator: "Equal"
-    value: "management"
+    value: "true"
     effect: "NoSchedule"
 node:
   tolerations:
-  - key: "nodepool"
+  - key: "ManagementOnly"
     operator: "Equal"
-    value: "management"
+    value: "true"
     effect: "NoSchedule"
 `
 

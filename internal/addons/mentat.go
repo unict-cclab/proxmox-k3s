@@ -56,6 +56,11 @@ spec:
         app: mentat
     spec:
       serviceAccountName: mentat
+      tolerations:
+      - key: "ManagementOnly"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
       containers:
       - name: mentat
         image: ghcr.io/unict-cclab/mentat:%s

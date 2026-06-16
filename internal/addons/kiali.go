@@ -285,9 +285,9 @@ spec:
                 values:
                 - management
       tolerations:
-      - key: "nodepool"
+      - key: "ManagementOnly"
         operator: "Equal"
-        value: "management"
+        value: "true"
         effect: "NoSchedule"
       serviceAccountName: kiali
       containers:

@@ -121,6 +121,23 @@ clusters:
         grafana_node_port: 32000
         grafana_admin_password: "admin"
 
+      # mon-agent annotates nodes/deployments with Prometheus metrics. The
+      # installer labels the default namespace with mon-agent/enabled=true.
+      mon_agent:
+        enabled: true
+        # version: "v0.0.3"
+        # prometheus_url: "http://prometheus-stack-kube-prom-prometheus.observability:9090"
+        # scrape_period_seconds: 30
+        # promql_range: "5m"
+        # namespace_label_selector: "mon-agent/enabled=true"
+
+      # cluster-lens topology UI, exposed through a NodePort.
+      cluster_lens:
+        enabled: true
+        # version: "latest"
+        node_port: 32088
+        # refresh: "2s"
+
       # Loki + Alloy — collects HPA scaling events and exposes Loki for external queries
       # logging:
       #   enabled: true
@@ -231,6 +248,7 @@ clusters:
         enabled: true
         # version: "1.30.0"
         # gateway_api_version: "v1.3.0"
+        # The installer labels the default namespace with istio-injection=enabled.
 
       # Jaeger all-in-one tracing (requires istio.enabled: true)
       # Deployed into the observability namespace.

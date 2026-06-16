@@ -168,12 +168,15 @@ Most addon UIs and APIs are exposed with Kubernetes NodePorts, so they are reach
 | Cilium cluster mesh | ClusterMesh API | Not configurable | `32379` when cluster mesh is enabled | Internal Cilium mesh access |
 | Monitoring | Prometheus | `addons.monitoring.prometheus_node_port` | `32090` | `http://<node-ip>:32090` |
 | Monitoring | Grafana | `addons.monitoring.grafana_node_port` | `32000` | `http://<node-ip>:32000` |
+| Cluster Lens | Topology UI | `addons.cluster_lens.node_port` | `32088` | `http://<node-ip>:32088` |
 | Logging | Loki API | `addons.logging.loki_node_port` | `32099` | `http://<node-ip>:32099` |
 | Istio tracing | Jaeger UI | `addons.jaeger.node_port` | `30002` | `http://<node-ip>:30002` |
 | Istio console | Kiali UI | `addons.kiali.node_port` | `30001` | `http://<node-ip>:30001` |
 | Chaos Mesh | Dashboard | `addons.chaos_mesh.dashboard_node_port` | `32300` | `http://<node-ip>:32300` |
 
-When monitoring is enabled, Grafana is also provisioned with a `Sophos` folder. It includes an `Application Metrics` dashboard with namespace/group filters, request metrics, p95 response time, replicas, CPU, and memory panels, plus an `Infrastructure Metrics` dashboard with Mentat node latency and node CPU/memory panels. The infrastructure topology panel uses the Business Charts Grafana plugin so node-to-node latency labels stay visible and nodes can be dragged. The application traffic panels use Istio metrics when Istio scraping is enabled.
+When monitoring is enabled, Grafana is also provisioned with a `Sophos` folder. It includes an `Application Metrics` dashboard with namespace/group filters, request metrics, p95 response time, replicas, CPU, and memory panels, plus an `Infrastructure Metrics` dashboard with Mentat node latency and node CPU/memory panels. The infrastructure topology panel uses the Business Charts Grafana plugin so node-to-node latency labels stay visible, nodes can be dragged without being reset on refresh, and each node can show the mon-agent CPU, memory, disk-bandwidth, and network-bandwidth annotations. The application traffic panels use Istio metrics when Istio scraping is enabled.
+
+Enable `addons.mon_agent` to deploy mon-agent into `observability`. The installer labels the `default` namespace with `mon-agent/enabled=true` so default-namespace deployments are annotated automatically. When Istio is enabled, the installer also labels `default` with `istio-injection=enabled` for Envoy sidecar injection.
 
 Harbor and NFS are provisioned as separate infrastructure VMs rather than Kubernetes NodePort services. Mentat exposes Prometheus metrics inside the cluster and is scraped automatically when monitoring is enabled.
 

@@ -212,6 +212,9 @@ func provisionClusters(ctx context.Context, cfg *config.Config, px *pxclient.Cli
 		if st.spec.Addons.ChaosMesh.Enabled {
 			ui.Info(out, "  %s  Chaos Mesh dashboard :%d", st.spec.Name, st.spec.Addons.ChaosMesh.DashboardNodePort)
 		}
+		if st.spec.Addons.ClusterLens.Enabled {
+			ui.Info(out, "  %s  Cluster Lens :%d", st.spec.Name, st.spec.Addons.ClusterLens.NodePort)
+		}
 	}
 	return states, nil
 }
@@ -457,8 +460,24 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 		}
 	}
 
+	if err := addons.EnsureDefaultNamespaceLabels(
+		runner,
+		st.spec.Addons.MonAgent.Enabled,
+		st.spec.Addons.Istio.Enabled,
+		st.spec.Name,
+		out,
+	); err != nil {
+		return err
+	}
+
 	if st.spec.Addons.Monitoring.Enabled {
 		if err := addons.InstallMonitoring(runner, st.spec.Addons.Monitoring, st.spec.Name, out); err != nil {
+			return err
+		}
+	}
+
+	if st.spec.Addons.MonAgent.Enabled {
+		if err := addons.InstallMonAgent(runner, st.spec.Addons.MonAgent, st.spec.Name, out); err != nil {
 			return err
 		}
 	}
@@ -516,6 +535,12 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 
 	if st.spec.Addons.Mentat.Enabled {
 		if err := addons.InstallMentat(runner, st.spec.Addons.Mentat, st.spec.Name, st.spec.Addons.Monitoring.Enabled, out); err != nil {
+			return err
+		}
+	}
+
+	if st.spec.Addons.ClusterLens.Enabled {
+		if err := addons.InstallClusterLens(runner, st.spec.Addons.ClusterLens, st.spec.Name, out); err != nil {
 			return err
 		}
 	}

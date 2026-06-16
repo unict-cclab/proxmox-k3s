@@ -87,9 +87,9 @@ spec:
                 values:
                 - management
       tolerations:
-      - key: "nodepool"
+      - key: "ManagementOnly"
         operator: "Equal"
-        value: "management"
+        value: "true"
         effect: "NoSchedule"
       containers:
       - image: jaegertracing/all-in-one:%s

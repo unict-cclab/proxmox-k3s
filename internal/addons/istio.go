@@ -32,9 +32,9 @@ const istiodBaseValues = `affinity:
           values:
           - management
 tolerations:
-- key: "nodepool"
+- key: "ManagementOnly"
   operator: "Equal"
-  value: "management"
+  value: "true"
   effect: "NoSchedule"
 `
 
@@ -184,7 +184,7 @@ func InstallIstio(runner *util.Runner, istio config.IstioConfig, jaegerEnabled b
 
 	// istiod is the Istio control plane (pilot, citadel, galley).
 	// Preferred affinity steers it to the management node pool when one is present;
-	// the toleration lets it run there if the pool carries a nodepool=management:NoSchedule taint.
+	// the toleration lets it run there if the pool carries a ManagementOnly=true:NoSchedule taint.
 	// affinity and tolerations are root-level values in the istiod chart (no pilot: wrapper).
 	ui.Step(out, "[%s] installing istiod %s...", clusterName, istio.Version)
 	istiodChart := fmt.Sprintf("istio/istiod --version %s", istio.Version)

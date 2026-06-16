@@ -21,6 +21,11 @@ const (
 const chaosMeshValuesTemplate = `chaosDaemon:
   runtime: containerd
   socketPath: /run/k3s/containerd/containerd.sock
+  tolerations:
+  - key: "ManagementOnly"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
 
 controllerManager:
   replicaCount: 1
@@ -35,9 +40,9 @@ controllerManager:
             values:
             - management
   tolerations:
-  - key: "nodepool"
+  - key: "ManagementOnly"
     operator: "Equal"
-    value: "management"
+    value: "true"
     effect: "NoSchedule"
 
 dashboard:
@@ -54,9 +59,9 @@ dashboard:
             values:
             - management
   tolerations:
-  - key: "nodepool"
+  - key: "ManagementOnly"
     operator: "Equal"
-    value: "management"
+    value: "true"
     effect: "NoSchedule"
   service:
     type: NodePort

@@ -40,9 +40,9 @@ hubble:
               values:
               - management
     tolerations:
-    - key: "nodepool"
+    - key: "ManagementOnly"
       operator: "Equal"
-      value: "management"
+      value: "true"
       effect: "NoSchedule"
   ui:
     enabled: true
@@ -57,9 +57,9 @@ hubble:
               values:
               - management
     tolerations:
-    - key: "nodepool"
+    - key: "ManagementOnly"
       operator: "Equal"
-      value: "management"
+      value: "true"
       effect: "NoSchedule"
 operator:
   replicas: 1
@@ -74,7 +74,10 @@ operator:
             values:
             - management
   tolerations:
-  - operator: "Exists"
+  - key: "ManagementOnly"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
 ipam:
   mode: kubernetes
 `

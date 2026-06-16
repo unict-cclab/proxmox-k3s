@@ -60,9 +60,9 @@ singleBinary:
             values:
             - management
   tolerations:
-  - key: "nodepool"
+  - key: "ManagementOnly"
     operator: "Equal"
-    value: "management"
+    value: "true"
     effect: "NoSchedule"
 
 read:
@@ -85,9 +85,9 @@ gateway:
             values:
             - management
   tolerations:
-  - key: "nodepool"
+  - key: "ManagementOnly"
     operator: "Equal"
-    value: "management"
+    value: "true"
     effect: "NoSchedule"
   service:
     type: NodePort
@@ -121,9 +121,9 @@ const loggingAlloyValuesTemplate = `controller:
             values:
             - management
   tolerations:
-  - key: "nodepool"
+  - key: "ManagementOnly"
     operator: "Equal"
-    value: "management"
+    value: "true"
     effect: "NoSchedule"
 
 alloy:
