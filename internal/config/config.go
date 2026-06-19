@@ -154,9 +154,11 @@ type IstioConfig struct {
 // JaegerConfig configures Jaeger all-in-one tracing deployment per cluster.
 // Requires Istio to be enabled. Disabled by default.
 type JaegerConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Version  string `yaml:"version"`   // image tag, default "1.53"
-	NodePort int    `yaml:"node_port"` // NodePort for UI (port 16686), default 30002
+	Enabled      bool   `yaml:"enabled"`
+	Version      string `yaml:"version"`       // image tag, default "1.53"
+	NodePort     int    `yaml:"node_port"`     // NodePort for UI (port 16686), default 30002
+	StorageClass string `yaml:"storage_class"` // PVC StorageClass for Badger data, default "local-path"
+	StorageSize  string `yaml:"storage_size"`  // Badger PVC size, default "10Gi"
 }
 
 // KialiConfig configures Kiali service mesh console deployment per cluster.
@@ -561,6 +563,12 @@ func (c *Config) applyMultiDefaults() {
 			}
 			if spec.Addons.Jaeger.NodePort == 0 {
 				spec.Addons.Jaeger.NodePort = 30002
+			}
+			if spec.Addons.Jaeger.StorageClass == "" {
+				spec.Addons.Jaeger.StorageClass = "local-path"
+			}
+			if spec.Addons.Jaeger.StorageSize == "" {
+				spec.Addons.Jaeger.StorageSize = "10Gi"
 			}
 		}
 		if spec.Addons.Istio.Enabled {

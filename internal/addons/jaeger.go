@@ -9,8 +9,8 @@ import (
 	"github.com/unict-cclab/proxmox-k3s/internal/util"
 )
 
-// jaegerManifestTemplate deploys Jaeger all-in-one into istio-system.
-// Format args: nodePort (int), version (string).
+// jaegerManifestTemplate deploys Jaeger all-in-one into observability.
+// Format args: nodePort (int), storageClass, storageSize, version.
 const jaegerManifestTemplate = `apiVersion: v1
 kind: Service
 metadata:
@@ -58,6 +58,21 @@ spec:
   selector:
     service: jaeger
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    service: jaeger
+  name: jaeger-badger
+  namespace: observability
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: %s
+  resources:
+    requests:
+      storage: %s
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -94,6 +109,15 @@ spec:
       containers:
       - image: jaegertracing/all-in-one:%s
         name: jaeger
+        env:
+        - name: SPAN_STORAGE_TYPE
+          value: badger
+        - name: BADGER_EPHEMERAL
+          value: "false"
+        - name: BADGER_DIRECTORY_VALUE
+          value: /badger/data
+        - name: BADGER_DIRECTORY_KEY
+          value: /badger/key
         ports:
         - containerPort: 14269
         - containerPort: 5778
@@ -115,19 +139,26 @@ spec:
           limits:
             cpu: 1000m
             memory: 1Gi
+        volumeMounts:
+        - name: jaeger-badger
+          mountPath: /badger
+      volumes:
+      - name: jaeger-badger
+        persistentVolumeClaim:
+          claimName: jaeger-badger
       restartPolicy: Always
 `
 
-// InstallJaeger deploys Jaeger all-in-one into the istio-system namespace.
+// InstallJaeger deploys Jaeger all-in-one into the observability namespace.
 func InstallJaeger(runner *util.Runner, addon config.JaegerConfig, clusterName string, out io.Writer) error {
-	ui.Step(out, "[%s] deploying Jaeger %s (UI :%d)...", clusterName, addon.Version, addon.NodePort)
-	manifest := fmt.Sprintf(jaegerManifestTemplate, addon.NodePort, addon.Version)
+	ui.Step(out, "[%s] deploying Jaeger %s with Badger storage (UI :%d)...", clusterName, addon.Version, addon.NodePort)
+	manifest := fmt.Sprintf(jaegerManifestTemplate, addon.NodePort, addon.StorageClass, addon.StorageSize, addon.Version)
 	if err := runner.WriteFile("/tmp/jaeger.yaml", []byte(manifest)); err != nil {
 		return fmt.Errorf("[%s] writing Jaeger manifest: %w", clusterName, err)
 	}
 	if err := runner.Run("kubectl apply -f /tmp/jaeger.yaml", out); err != nil {
 		return fmt.Errorf("[%s] applying Jaeger manifest: %w", clusterName, err)
 	}
-	ui.Success(out, "[%s] Jaeger ready — UI :%d", clusterName, addon.NodePort)
+	ui.Success(out, "[%s] Jaeger ready — UI :%d, Badger PVC %s (%s)", clusterName, addon.NodePort, addon.StorageSize, addon.StorageClass)
 	return nil
 }

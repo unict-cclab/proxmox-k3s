@@ -256,6 +256,8 @@ clusters:
         enabled: true
         # version: "1.53"
         node_port: 30002          # UI on port 16686
+        # storage_class: "local-path"
+        # storage_size: "10Gi"
 
       # Kiali service mesh console — installed automatically when istio is enabled.
       # Configure node_port/version here if you need non-default values.
