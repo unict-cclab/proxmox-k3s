@@ -10,7 +10,7 @@ import (
 )
 
 // mentatCoreManifest deploys the ServiceAccount, RBAC, and DaemonSet.
-// Format args: version (string), sleepSeconds (int).
+// Format args: version and Mentat probe settings.
 const mentatCoreManifest = `apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -67,6 +67,10 @@ spec:
         ports:
         - name: metrics
           containerPort: 2112
+        - name: bandwidth
+          containerPort: %d
+          hostPort: %d
+          protocol: TCP
         env:
         - name: SLEEP_SECONDS
           value: "%d"
@@ -74,6 +78,18 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        - name: PING_ATTEMPTS
+          value: "%d"
+        - name: PING_TIMEOUT_SECONDS
+          value: "%d"
+        - name: BANDWIDTH_PORT
+          value: "%d"
+        - name: BANDWIDTH_BYTES
+          value: "%d"
+        - name: BANDWIDTH_INTERVAL_SECONDS
+          value: "%d"
+        - name: BANDWIDTH_TIMEOUT_SECONDS
+          value: "%d"
 `
 
 const mentatPodMonitor = `apiVersion: monitoring.coreos.com/v1
@@ -92,13 +108,13 @@ spec:
   - port: metrics
 `
 
-// InstallMentat deploys the mentat network-latency DaemonSet into the observability
+// InstallMentat deploys the mentat network measurement DaemonSet into the observability
 // namespace. When withMonitoring is true the PodMonitor is also applied so that
 // Prometheus scrapes the latency metrics automatically.
 func InstallMentat(runner *util.Runner, addon config.MentatConfig, clusterName string, withMonitoring bool, out io.Writer) error {
 	ui.Step(out, "[%s] installing mentat %s (probe interval %ds)...", clusterName, addon.Version, addon.SleepSeconds)
 
-	core := fmt.Sprintf(mentatCoreManifest, addon.Version, addon.SleepSeconds)
+	core := renderMentatCoreManifest(addon)
 	if err := runner.WriteFile("/tmp/mentat.yaml", []byte(core)); err != nil {
 		return fmt.Errorf("[%s] writing mentat manifest: %w", clusterName, err)
 	}
@@ -117,4 +133,20 @@ func InstallMentat(runner *util.Runner, addon config.MentatConfig, clusterName s
 
 	ui.Success(out, "[%s] mentat ready", clusterName)
 	return nil
+}
+
+func renderMentatCoreManifest(addon config.MentatConfig) string {
+	return fmt.Sprintf(
+		mentatCoreManifest,
+		addon.Version,
+		addon.BandwidthPort,
+		addon.BandwidthPort,
+		addon.SleepSeconds,
+		addon.PingAttempts,
+		addon.PingTimeoutSeconds,
+		addon.BandwidthPort,
+		addon.BandwidthBytes,
+		addon.BandwidthIntervalSeconds,
+		addon.BandwidthTimeoutSeconds,
+	)
 }

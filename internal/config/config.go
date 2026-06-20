@@ -117,7 +117,7 @@ type MonitoringConfig struct {
 // with metrics collected from Prometheus.
 type MonAgentConfig struct {
 	Enabled                bool   `yaml:"enabled"`
-	Version                string `yaml:"version"` // image tag, default "v0.0.3"
+	Version                string `yaml:"version"` // image tag, default "v0.0.5"
 	PrometheusURL          string `yaml:"prometheus_url"`
 	ScrapePeriodSeconds    int    `yaml:"scrape_period_seconds"`
 	PromQLRange            string `yaml:"promql_range"`
@@ -127,7 +127,7 @@ type MonAgentConfig struct {
 // ClusterLensConfig configures the cluster-lens topology UI.
 type ClusterLensConfig struct {
 	Enabled  bool   `yaml:"enabled"`
-	Version  string `yaml:"version"`   // image tag, default "latest"
+	Version  string `yaml:"version"`   // image tag, default "v0.0.2"
 	NodePort int    `yaml:"node_port"` // NodePort for UI (port 8088), default 32088
 	Refresh  string `yaml:"refresh"`   // frontend polling interval, default "2s"
 }
@@ -192,12 +192,18 @@ type ChaosMeshConfig struct {
 	DashboardNodePort int    `yaml:"dashboard_node_port"` // NodePort for the dashboard (port 2333), default 32300
 }
 
-// MentatConfig configures the mentat network-latency DaemonSet per cluster.
+// MentatConfig configures the mentat inter-node network measurement DaemonSet.
 // Set enabled: true to deploy mentat into the observability namespace.
 type MentatConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Version      string `yaml:"version"`       // image tag, default "v0.1.0"
-	SleepSeconds int    `yaml:"sleep_seconds"` // probe interval in seconds, default 5
+	Enabled                  bool   `yaml:"enabled"`
+	Version                  string `yaml:"version"`                    // image tag, default "v0.1.0"
+	SleepSeconds             int    `yaml:"sleep_seconds"`              // ICMP probe interval, default 5
+	PingAttempts             int    `yaml:"ping_attempts"`              // ICMP packets per peer, default 5
+	PingTimeoutSeconds       int    `yaml:"ping_timeout_seconds"`       // per-packet timeout, default 1
+	BandwidthPort            int    `yaml:"bandwidth_port"`             // host port for peer probes, default 2113
+	BandwidthBytes           int    `yaml:"bandwidth_bytes"`            // bytes per bandwidth probe, default 16 MiB
+	BandwidthIntervalSeconds int    `yaml:"bandwidth_interval_seconds"` // bandwidth probe interval, default 60
+	BandwidthTimeoutSeconds  int    `yaml:"bandwidth_timeout_seconds"`  // per-probe timeout, default 30
 }
 
 // NFSAddonConfig controls the NFS CSI driver installation for a cluster.
@@ -424,21 +430,27 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) applyMultiDefaults() {
 	const (
-		defaultCiliumVersion      = "1.19.4"
-		defaultMonitoringVersion  = "84.5.0"
-		defaultMonAgentVersion    = "v0.0.3"
-		defaultClusterLensVersion = "latest"
-		defaultLokiVersion        = "6.41.1"
-		defaultAlloyVersion       = "1.4.0"
-		defaultIstioVersion       = "1.30.0"
-		defaultJaegerVersion      = "1.53"
-		defaultKialiVersion       = "v2.8"
-		defaultNFSCSIVersion      = "v4.9.0"
-		defaultNFSDataDir         = "/data/nfs"
-		defaultNFSExportSubnet    = "*"
-		defaultChaosMeshVersion   = "2.7.1"
-		defaultMentatVersion      = "v0.1.0"
-		defaultMentatSleep        = 5
+		defaultCiliumVersion           = "1.19.4"
+		defaultMonitoringVersion       = "84.5.0"
+		defaultMonAgentVersion         = "v0.0.5"
+		defaultClusterLensVersion      = "v0.0.2"
+		defaultLokiVersion             = "6.41.1"
+		defaultAlloyVersion            = "1.4.0"
+		defaultIstioVersion            = "1.30.0"
+		defaultJaegerVersion           = "1.53"
+		defaultKialiVersion            = "v2.8"
+		defaultNFSCSIVersion           = "v4.9.0"
+		defaultNFSDataDir              = "/data/nfs"
+		defaultNFSExportSubnet         = "*"
+		defaultChaosMeshVersion        = "2.7.1"
+		defaultMentatVersion           = "v0.1.0"
+		defaultMentatSleep             = 5
+		defaultMentatPingAttempts      = 5
+		defaultMentatPingTimeout       = 1
+		defaultMentatBandwidthPort     = 2113
+		defaultMentatBandwidthBytes    = 16 * 1024 * 1024
+		defaultMentatBandwidthInterval = 60
+		defaultMentatBandwidthTimeout  = 30
 	)
 
 	if n := c.NFS; n != nil {
@@ -606,6 +618,24 @@ func (c *Config) applyMultiDefaults() {
 			if spec.Addons.Mentat.SleepSeconds == 0 {
 				spec.Addons.Mentat.SleepSeconds = defaultMentatSleep
 			}
+			if spec.Addons.Mentat.PingAttempts == 0 {
+				spec.Addons.Mentat.PingAttempts = defaultMentatPingAttempts
+			}
+			if spec.Addons.Mentat.PingTimeoutSeconds == 0 {
+				spec.Addons.Mentat.PingTimeoutSeconds = defaultMentatPingTimeout
+			}
+			if spec.Addons.Mentat.BandwidthPort == 0 {
+				spec.Addons.Mentat.BandwidthPort = defaultMentatBandwidthPort
+			}
+			if spec.Addons.Mentat.BandwidthBytes == 0 {
+				spec.Addons.Mentat.BandwidthBytes = defaultMentatBandwidthBytes
+			}
+			if spec.Addons.Mentat.BandwidthIntervalSeconds == 0 {
+				spec.Addons.Mentat.BandwidthIntervalSeconds = defaultMentatBandwidthInterval
+			}
+			if spec.Addons.Mentat.BandwidthTimeoutSeconds == 0 {
+				spec.Addons.Mentat.BandwidthTimeoutSeconds = defaultMentatBandwidthTimeout
+			}
 		}
 		if spec.Addons.Registry != nil && spec.Addons.Registry.HTTPPort == 0 {
 			spec.Addons.Registry.HTTPPort = 80
@@ -749,6 +779,16 @@ func (c *Config) validateClusters() error {
 		}
 		if p := spec.Addons.ChaosMesh.DashboardNodePort; p != 0 && (p < 30000 || p > 32767) {
 			return fmt.Errorf("clusters[%d] (%s): addons.chaos_mesh.dashboard_node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if spec.Addons.Mentat.Enabled {
+			mentat := spec.Addons.Mentat
+			if mentat.SleepSeconds <= 0 || mentat.PingAttempts <= 0 || mentat.PingTimeoutSeconds <= 0 ||
+				mentat.BandwidthBytes <= 0 || mentat.BandwidthIntervalSeconds <= 0 || mentat.BandwidthTimeoutSeconds <= 0 {
+				return fmt.Errorf("clusters[%d] (%s): mentat probe intervals, counts, sizes, and timeouts must be positive", i, spec.Name)
+			}
+			if mentat.BandwidthPort < 1 || mentat.BandwidthPort > 65535 {
+				return fmt.Errorf("clusters[%d] (%s): addons.mentat.bandwidth_port must be in range 1–65535", i, spec.Name)
+			}
 		}
 		if p := spec.Addons.Logging.LokiNodePort; p != 0 && (p < 30000 || p > 32767) {
 			return fmt.Errorf("clusters[%d] (%s): addons.logging.loki_node_port must be 0 or in range 30000–32767", i, spec.Name)

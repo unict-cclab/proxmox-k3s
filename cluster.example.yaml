@@ -125,7 +125,7 @@ clusters:
       # installer labels the default namespace with mon-agent/enabled=true.
       mon_agent:
         enabled: true
-        # version: "v0.0.3"
+        # version: "v0.0.5"
         # prometheus_url: "http://prometheus-stack-kube-prom-prometheus.observability:9090"
         # scrape_period_seconds: 30
         # promql_range: "5m"
@@ -134,7 +134,7 @@ clusters:
       # cluster-lens topology UI, exposed through a NodePort.
       cluster_lens:
         enabled: true
-        # version: "latest"
+        # version: "v0.0.2"
         node_port: 32088
         # refresh: "2s"
 
@@ -178,11 +178,17 @@ clusters:
       #   # version: "2.7.1"
       #   dashboard_node_port: 32300
 
-      # Mentat — inter-node network latency measurement (DaemonSet + Prometheus metrics)
+      # Mentat — inter-node latency, packet loss, and bandwidth measurement
       # mentat:
       #   enabled: true
       #   # version: "v0.1.0"
       #   # sleep_seconds: 5
+      #   # ping_attempts: 5
+      #   # ping_timeout_seconds: 1
+      #   # bandwidth_port: 2113
+      #   # bandwidth_bytes: 16777216
+      #   # bandwidth_interval_seconds: 60
+      #   # bandwidth_timeout_seconds: 30
 
     control_plane:
       - name: cp-01

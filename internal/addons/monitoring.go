@@ -22,8 +22,6 @@ const monitoringValuesTemplate = `alertmanager:
   enabled: false
 
 grafana:
-  plugins:
-    - volkovlabs-echarts-panel
   sidecar:
     dashboards:
       enabled: true
@@ -64,7 +62,7 @@ kube-state-metrics:
     - deployments=[group,app]
     - pods=[group,app]
   metricAnnotationsAllowList:
-    - nodes=[cpu-usage,memory-usage,disk-bandwidth,network-bandwidth]
+    - nodes=[cpu-usage,memory-usage,disk-throughput,network-throughput]
   affinity:
     nodeAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
@@ -399,7 +397,7 @@ data:
       ],
       "timezone": "browser",
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "refresh": "5s",
       "time": {
         "from": "now-1h",
@@ -477,38 +475,6 @@ data:
       },
       "panels": [
         {
-          "id": 1,
-          "title": "Node Latency Graph",
-          "type": "volkovlabs-echarts-panel",
-          "gridPos": {
-            "h": 16,
-            "w": 24,
-            "x": 0,
-            "y": 0
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "instant": true,
-              "expr": "1000 * sum by (origin_node, destination_node) (rate(node_latency_sum{origin_node=~\"$origin_node\",destination_node=~\"$destination_node\"}[$latency_window])) / sum by (origin_node, destination_node) (rate(node_latency_count{origin_node=~\"$origin_node\",destination_node=~\"$destination_node\"}[$latency_window]))"
-            },
-            {
-              "refId": "B",
-              "instant": true,
-              "expr": "kube_node_annotations{node=~\"$node\"}"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {},
-            "overrides": []
-          },
-          "options": {
-            "renderer": "canvas",
-            "editorMode": "code",
-            "getOption": "const valueAt = (values, index) => values.get ? values.get(index) : values[index];\nconst finiteNumber = (value) => {\n  const next = Number(value);\n  return Number.isFinite(next) ? next : null;\n};\nconst formatBytes = (value) => {\n  if (!Number.isFinite(value)) {\n    return 'n/a';\n  }\n  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];\n  let next = value;\n  let unit = 0;\n  while (Math.abs(next) >= 1024 && unit < units.length - 1) {\n    next /= 1024;\n    unit += 1;\n  }\n  return next.toFixed(unit === 0 ? 0 : 1) + ' ' + units[unit];\n};\nconst formatRate = (value) => Number.isFinite(value) ? formatBytes(value) + '/s' : 'n/a';\nconst formatMillicores = (value) => Number.isFinite(value) ? value.toFixed(1) + ' mCPU' : 'n/a';\nconst links = [];\nconst nodeNames = new Set();\nconst nodeMetrics = {};\nconst storageKey = 'sophos-node-latency-positions:v1:' + (context.panel.id || 'infrastructure');\nconst chartWidth = context.panel.chart && context.panel.chart.getWidth ? context.panel.chart.getWidth() : 900;\nconst chartHeight = context.panel.chart && context.panel.chart.getHeight ? context.panel.chart.getHeight() : 620;\nconst loadPositions = () => {\n  try {\n    return JSON.parse(localStorage.getItem(storageKey) || '{}');\n  } catch (error) {\n    return {};\n  }\n};\nconst savePositions = (positions) => {\n  try {\n    localStorage.setItem(storageKey, JSON.stringify(positions));\n  } catch (error) {}\n};\nconst capturePositions = () => {\n  const positions = loadPositions();\n  const chart = context.panel.chart;\n  const model = chart && chart.getModel && chart.getModel();\n  const seriesModel = model && model.getSeriesByIndex && model.getSeriesByIndex(0);\n  const data = seriesModel && seriesModel.getData && seriesModel.getData();\n  if (!data || !data.each) {\n    return positions;\n  }\n  data.each((idx) => {\n    const raw = data.getRawDataItem(idx) || {};\n    const layout = data.getItemLayout(idx);\n    const name = raw.name || raw.id;\n    if (name && Array.isArray(layout) && Number.isFinite(layout[0]) && Number.isFinite(layout[1])) {\n      positions[name] = {x: layout[0], y: layout[1], width: chartWidth, height: chartHeight};\n    }\n  });\n  savePositions(positions);\n  return positions;\n};\nconst storedPositions = context.panel.chart ? capturePositions() : loadPositions();\n\ncontext.panel.data.series.forEach((frame) => {\n  const valueField = frame.fields.find((field) => field.type === 'number');\n  if (!valueField) {\n    return;\n  }\n\n  const labels = valueField.labels || {};\n  const source = labels.origin_node;\n  const target = labels.destination_node;\n  if (source && target) {\n    const values = valueField.values;\n    const latency = Number(valueAt(values, values.length - 1));\n    if (!Number.isFinite(latency)) {\n      return;\n    }\n    nodeNames.add(source);\n    nodeNames.add(target);\n    links.push({\n      source,\n      target,\n      value: latency,\n      latencyLabel: latency.toFixed(3) + ' ms',\n    });\n    return;\n  }\n\n  const node = labels.node;\n  if (node) {\n    nodeNames.add(node);\n    nodeMetrics[node] = {\n      cpu: finiteNumber(labels.annotation_cpu_usage),\n      memory: finiteNumber(labels.annotation_memory_usage),\n      disk: finiteNumber(labels.annotation_disk_bandwidth),\n      network: finiteNumber(labels.annotation_network_bandwidth),\n    };\n  }\n});\n\nconst width = Math.max(chartWidth, 480);\nconst height = Math.max(chartHeight, 360);\nconst centerX = width / 2;\nconst centerY = height / 2;\nconst radius = Math.min(width, height) * 0.36;\nconst names = Array.from(nodeNames).sort();\nconst nodes = names.map((name, index) => {\n  const angle = names.length === 1 ? 0 : (2 * Math.PI * index) / names.length - Math.PI / 2;\n  const saved = storedPositions[name];\n  const savedWidth = saved && Number.isFinite(saved.width) ? saved.width : 900;\n  const savedHeight = saved && Number.isFinite(saved.height) ? saved.height : 420;\n  const savedX = saved && Number.isFinite(saved.x) ? (saved.x / savedWidth) * width : null;\n  const savedY = saved && Number.isFinite(saved.y) ? (saved.y / savedHeight) * height : null;\n  const metrics = nodeMetrics[name] || {};\n  const labelParts = [name];\n  if (Number.isFinite(metrics.cpu)) {\n    labelParts.push(metrics.cpu.toFixed(1) + ' mCPU');\n  }\n  if (Number.isFinite(metrics.memory)) {\n    labelParts.push(formatBytes(metrics.memory));\n  }\n  return {\n    id: name,\n    name,\n    metrics,\n    x: Number.isFinite(savedX) ? savedX : centerX + radius * Math.cos(angle),\n    y: Number.isFinite(savedY) ? savedY : centerY + radius * Math.sin(angle),\n    symbolSize: 72,\n    draggable: true,\n    label: {show: true, formatter: labelParts.join('\\n')},\n  };\n});\n\nif (context.panel.chart) {\n  if (context.panel.chart.__sophosSaveNodePositions) {\n    context.panel.chart.off('mouseup', context.panel.chart.__sophosSaveNodePositions);\n    context.panel.chart.off('globalout', context.panel.chart.__sophosSaveNodePositions);\n  }\n  context.panel.chart.__sophosSaveNodePositions = () => capturePositions();\n  context.panel.chart.on('mouseup', context.panel.chart.__sophosSaveNodePositions);\n  context.panel.chart.on('globalout', context.panel.chart.__sophosSaveNodePositions);\n}\n\nreturn {\n  backgroundColor: 'transparent',\n  animation: false,\n  tooltip: {\n    formatter: (params) => {\n      if (params.dataType === 'edge') {\n        return params.data.source + ' -> ' + params.data.target + '<br/>' + params.data.latencyLabel;\n      }\n      const metrics = params.data.metrics || {};\n      return [\n        '<strong>' + params.data.name + '</strong>',\n        'CPU: ' + formatMillicores(metrics.cpu),\n        'Memory: ' + formatBytes(metrics.memory),\n        'Disk bandwidth: ' + formatRate(metrics.disk),\n        'Network bandwidth: ' + formatRate(metrics.network),\n      ].join('<br/>');\n    },\n  },\n  series: [\n    {\n      type: 'graph',\n      layout: 'none',\n      coordinateSystem: null,\n      data: nodes,\n      links,\n      roam: true,\n      draggable: true,\n      edgeSymbol: ['none', 'arrow'],\n      edgeSymbolSize: [0, 10],\n      edgeLabel: {\n        show: true,\n        position: 'middle',\n        formatter: (params) => params.data.latencyLabel,\n        fontSize: 12,\n      },\n      label: {show: true, position: 'inside', fontWeight: 600, fontSize: 11, lineHeight: 14},\n      lineStyle: {width: 1.8, curveness: 0.18, opacity: 0.75},\n      emphasis: {focus: 'adjacency'},\n    },\n  ],\n};"
-          }
-        },
-        {
           "id": 2,
           "title": "Node Latency Mean Matrix",
           "type": "table",
@@ -516,7 +482,7 @@ data:
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 16
+            "y": 0
           },
           "targets": [
             {
@@ -545,7 +511,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 24
+            "y": 8
           },
           "targets": [
             {
@@ -578,7 +544,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 24
+            "y": 8
           },
           "targets": [
             {
@@ -604,6 +570,75 @@ data:
           }
         },
         {
+          "id": 14,
+          "title": "Inter-node Packet Loss",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{origin_node}} -> {{destination_node}}",
+              "expr": "100 * node_packet_loss_ratio{origin_node=~\"$origin_node\",destination_node=~\"$destination_node\"}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 15,
+          "title": "Available Inter-node Bandwidth",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 16
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{origin_node}} -> {{destination_node}}",
+              "expr": "node_bandwidth_bytes_per_second{origin_node=~\"$origin_node\",destination_node=~\"$destination_node\"}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
           "id": 5,
           "title": "Node CPU Usage - Cores",
           "type": "timeseries",
@@ -611,7 +646,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 32
+            "y": 24
           },
           "targets": [
             {
@@ -644,7 +679,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 32
+            "y": 24
           },
           "targets": [
             {
@@ -677,7 +712,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 40
+            "y": 32
           },
           "targets": [
             {
@@ -710,7 +745,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 40
+            "y": 32
           },
           "targets": [
             {
@@ -743,7 +778,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 48
+            "y": 40
           },
           "targets": [
             {
@@ -777,7 +812,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 48
+            "y": 40
           },
           "targets": [
             {
@@ -810,7 +845,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 56
+            "y": 48
           },
           "targets": [
             {
@@ -843,7 +878,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 56
+            "y": 48
           },
           "targets": [
             {
@@ -876,7 +911,7 @@ data:
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 64
+            "y": 56
           },
           "targets": [
             {
