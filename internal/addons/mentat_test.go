@@ -23,7 +23,9 @@ func TestRenderMentatCoreManifestIncludesNetworkProbeSettings(t *testing.T) {
 
 	for _, expected := range []string{
 		"ghcr.io/unict-cclab/mentat:v1.2.3",
-		"hostPort: 3113",
+		"containerPort: 3113",
+		"resources: [\"pods\"]",
+		"name: POD_NAMESPACE",
 		"name: PING_ATTEMPTS\n          value: \"4\"",
 		"name: BANDWIDTH_BYTES\n          value: \"1048576\"",
 		"name: BANDWIDTH_INTERVAL_SECONDS\n          value: \"45\"",

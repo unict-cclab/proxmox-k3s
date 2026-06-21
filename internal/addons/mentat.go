@@ -23,7 +23,7 @@ metadata:
   name: mentat
 rules:
   - apiGroups: [""]
-    resources: ["nodes"]
+    resources: ["pods"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -69,7 +69,6 @@ spec:
           containerPort: 2112
         - name: bandwidth
           containerPort: %d
-          hostPort: %d
           protocol: TCP
         env:
         - name: SLEEP_SECONDS
@@ -78,6 +77,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: PING_ATTEMPTS
           value: "%d"
         - name: PING_TIMEOUT_SECONDS
@@ -139,7 +142,6 @@ func renderMentatCoreManifest(addon config.MentatConfig) string {
 	return fmt.Sprintf(
 		mentatCoreManifest,
 		addon.Version,
-		addon.BandwidthPort,
 		addon.BandwidthPort,
 		addon.SleepSeconds,
 		addon.PingAttempts,
