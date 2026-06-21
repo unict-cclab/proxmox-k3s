@@ -447,7 +447,7 @@ func (c *Config) applyMultiDefaults() {
 		defaultNFSDataDir              = "/data/nfs"
 		defaultNFSExportSubnet         = "*"
 		defaultChaosMeshVersion        = "2.7.1"
-		defaultMentatVersion           = "v0.1.0"
+		defaultMentatVersion           = "v0.2.1"
 		defaultMentatSleep             = 5
 		defaultMentatPingAttempts      = 5
 		defaultMentatPingTimeout       = 1
