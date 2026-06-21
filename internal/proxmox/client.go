@@ -21,6 +21,7 @@ type Client struct {
 	httpClient   *http.Client
 	vmidMu       sync.Mutex
 	reservedVMID map[int]bool
+	cloneSem     chan struct{}
 }
 
 func New(cfg *config.Config) (*Client, error) {
@@ -42,7 +43,32 @@ func New(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("connecting to Proxmox at %s: %w", cfg.Proxmox.APIURL, err)
 	}
 
-	return &Client{api: api, cfg: cfg, httpClient: httpClient, reservedVMID: make(map[int]bool)}, nil
+	return &Client{
+		api: api, cfg: cfg, httpClient: httpClient,
+		reservedVMID: make(map[int]bool),
+		cloneSem:     make(chan struct{}, cfg.Template.CloneParallelism),
+	}, nil
+}
+
+func (c *Client) acquireClone(ctx context.Context) error {
+	// Tests and callers that construct Client directly predate cloneSem. In
+	// production New always initializes it.
+	if c.cloneSem == nil {
+		return nil
+	}
+	select {
+	case c.cloneSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) releaseClone() {
+	if c.cloneSem == nil {
+		return
+	}
+	<-c.cloneSem
 }
 
 // ConfigVM posts a VM config update via raw HTTP because go-proxmox does not

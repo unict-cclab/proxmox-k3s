@@ -85,8 +85,12 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 		vmid := nextVMIDStart
 
 		ui.Step(out, "cloning %s (VMID %d) from template...", spec.Name, vmid)
+		if err := c.acquireClone(ctx); err != nil {
+			return nil, fmt.Errorf("waiting for clone slot for %s: %w", spec.Name, err)
+		}
 		_, cloneTask, err := tmpl.Clone(ctx, cloneOptions(spec, vmid))
 		if err != nil {
+			c.releaseClone()
 			if isVMIDConflict(err) && attempt < cloudInitRetries-1 {
 				nextVMID, allocErr := c.NextVMID(ctx, vmid+1)
 				if allocErr != nil {
@@ -99,6 +103,7 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 			return nil, fmt.Errorf("cloning template for %s: %w", spec.Name, err)
 		}
 		if err := waitForTaskOK(ctx, cloneTask, cloneTaskTimeout); err != nil {
+			c.releaseClone()
 			if isVMIDConflict(err) && attempt < cloudInitRetries-1 {
 				nextVMID, allocErr := c.NextVMID(ctx, vmid+1)
 				if allocErr != nil {
@@ -110,6 +115,7 @@ func CreateVM(ctx context.Context, c *Client, cfg *config.Config, spec VMSpec, o
 			}
 			return nil, fmt.Errorf("waiting for clone of %s: %w", spec.Name, err)
 		}
+		c.releaseClone()
 
 		node, err := c.Node(ctx, spec.ProxmoxNode)
 		if err != nil {

@@ -239,21 +239,22 @@ type ProxmoxConfig struct {
 }
 
 type TemplateConfig struct {
-	Name           string `yaml:"name"`
-	ProxmoxNode    string `yaml:"proxmox_node"`
-	Storage        string `yaml:"storage"`
-	ImageStorage   string `yaml:"image_storage"`
-	Bridge         string `yaml:"bridge"`
-	IP             string `yaml:"ip"`
-	Gateway        string `yaml:"gateway"`
-	DNS            string `yaml:"dns"`
-	SubnetMask     int    `yaml:"subnet_mask"`
-	DiskSize       int    `yaml:"disk_size"`
-	Password       string `yaml:"password"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
-	OS             string `yaml:"os"`
-	CloudImageURL  string `yaml:"cloud_image_url"`
-	VMIDBase       int    `yaml:"vmid_base"`
+	Name             string `yaml:"name"`
+	ProxmoxNode      string `yaml:"proxmox_node"`
+	Storage          string `yaml:"storage"`
+	ImageStorage     string `yaml:"image_storage"`
+	Bridge           string `yaml:"bridge"`
+	IP               string `yaml:"ip"`
+	Gateway          string `yaml:"gateway"`
+	DNS              string `yaml:"dns"`
+	SubnetMask       int    `yaml:"subnet_mask"`
+	DiskSize         int    `yaml:"disk_size"`
+	Password         string `yaml:"password"`
+	TimeoutSeconds   int    `yaml:"timeout_seconds"`
+	CloneParallelism int    `yaml:"clone_parallelism"`
+	OS               string `yaml:"os"`
+	CloudImageURL    string `yaml:"cloud_image_url"`
+	VMIDBase         int    `yaml:"vmid_base"`
 }
 
 type K3sConfig struct {
@@ -396,6 +397,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Template.TimeoutSeconds == 0 {
 		c.Template.TimeoutSeconds = 1800
+	}
+	if c.Template.CloneParallelism == 0 {
+		c.Template.CloneParallelism = 1
 	}
 	if c.Template.CloudImageURL == "" {
 		if u, ok := KnownOSImages[c.Template.OS]; ok {
@@ -709,6 +713,9 @@ func (c *Config) validateClusters() error {
 	}
 	if c.Template.TimeoutSeconds <= 0 {
 		return fmt.Errorf("template.timeout_seconds must be greater than 0")
+	}
+	if c.Template.CloneParallelism <= 0 {
+		return fmt.Errorf("template.clone_parallelism must be greater than 0")
 	}
 
 	clusterNames := make(map[string]bool)

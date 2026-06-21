@@ -48,6 +48,7 @@ template:
   # password:                   # optional cloud-init password (SSH key auth is always enabled)
   # vmid_base: 8000             # first VMID to try when allocating the template VM
   # timeout_seconds: 1800       # max seconds to wait for template operations
+  # clone_parallelism: 1        # max concurrent clones across all clusters
 
 # ---------------------------------------------------------------------------
 # Harbor registry VM (optional)
