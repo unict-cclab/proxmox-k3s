@@ -91,6 +91,8 @@ spec:
           value: "%d"
         - name: BANDWIDTH_INTERVAL_SECONDS
           value: "%d"
+        - name: BANDWIDTH_JITTER_SECONDS
+          value: "%d"
         - name: BANDWIDTH_TIMEOUT_SECONDS
           value: "%d"
 `
@@ -149,6 +151,7 @@ func renderMentatCoreManifest(addon config.MentatConfig) string {
 		addon.BandwidthPort,
 		addon.BandwidthBytes,
 		addon.BandwidthIntervalSeconds,
+		addon.BandwidthJitterSeconds,
 		addon.BandwidthTimeoutSeconds,
 	)
 }

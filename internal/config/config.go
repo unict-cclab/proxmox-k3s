@@ -117,7 +117,7 @@ type MonitoringConfig struct {
 // with metrics collected from Prometheus.
 type MonAgentConfig struct {
 	Enabled                bool   `yaml:"enabled"`
-	Version                string `yaml:"version"` // image tag, default "v0.0.5"
+	Version                string `yaml:"version"` // image tag, default "v0.0.6"
 	PrometheusURL          string `yaml:"prometheus_url"`
 	ScrapePeriodSeconds    int    `yaml:"scrape_period_seconds"`
 	PromQLRange            string `yaml:"promql_range"`
@@ -127,7 +127,7 @@ type MonAgentConfig struct {
 // ClusterLensConfig configures the cluster-lens topology UI.
 type ClusterLensConfig struct {
 	Enabled  bool   `yaml:"enabled"`
-	Version  string `yaml:"version"`   // image tag, default "v0.0.2"
+	Version  string `yaml:"version"`   // image tag, default "v0.0.5"
 	NodePort int    `yaml:"node_port"` // NodePort for UI (port 8088), default 32088
 	Refresh  string `yaml:"refresh"`   // frontend polling interval, default "2s"
 }
@@ -196,13 +196,14 @@ type ChaosMeshConfig struct {
 // Set enabled: true to deploy mentat into the observability namespace.
 type MentatConfig struct {
 	Enabled                  bool   `yaml:"enabled"`
-	Version                  string `yaml:"version"`                    // image tag, default "v0.1.0"
+	Version                  string `yaml:"version"`                    // image tag, default "v0.3.0"
 	SleepSeconds             int    `yaml:"sleep_seconds"`              // ICMP probe interval, default 5
 	PingAttempts             int    `yaml:"ping_attempts"`              // ICMP packets per peer, default 5
 	PingTimeoutSeconds       int    `yaml:"ping_timeout_seconds"`       // per-packet timeout, default 1
 	BandwidthPort            int    `yaml:"bandwidth_port"`             // host port for peer probes, default 2113
-	BandwidthBytes           int    `yaml:"bandwidth_bytes"`            // bytes per bandwidth probe, default 16 MiB
-	BandwidthIntervalSeconds int    `yaml:"bandwidth_interval_seconds"` // bandwidth probe interval, default 60
+	BandwidthBytes           int    `yaml:"bandwidth_bytes"`            // bytes per bandwidth probe, default 256 KiB
+	BandwidthIntervalSeconds int    `yaml:"bandwidth_interval_seconds"` // bandwidth probe interval, default 90
+	BandwidthJitterSeconds   int    `yaml:"bandwidth_jitter_seconds"`   // random extra bandwidth delay, default 30
 	BandwidthTimeoutSeconds  int    `yaml:"bandwidth_timeout_seconds"`  // per-probe timeout, default 30
 }
 
@@ -436,8 +437,8 @@ func (c *Config) applyMultiDefaults() {
 	const (
 		defaultCiliumVersion           = "1.19.4"
 		defaultMonitoringVersion       = "84.5.0"
-		defaultMonAgentVersion         = "v0.0.5"
-		defaultClusterLensVersion      = "v0.0.2"
+		defaultMonAgentVersion         = "v0.0.6"
+		defaultClusterLensVersion      = "v0.0.5"
 		defaultLokiVersion             = "6.41.1"
 		defaultAlloyVersion            = "1.4.0"
 		defaultIstioVersion            = "1.30.0"
@@ -447,13 +448,14 @@ func (c *Config) applyMultiDefaults() {
 		defaultNFSDataDir              = "/data/nfs"
 		defaultNFSExportSubnet         = "*"
 		defaultChaosMeshVersion        = "2.7.1"
-		defaultMentatVersion           = "v0.2.1"
+		defaultMentatVersion           = "v0.3.0"
 		defaultMentatSleep             = 5
 		defaultMentatPingAttempts      = 5
 		defaultMentatPingTimeout       = 1
 		defaultMentatBandwidthPort     = 2113
-		defaultMentatBandwidthBytes    = 16 * 1024 * 1024
-		defaultMentatBandwidthInterval = 60
+		defaultMentatBandwidthBytes    = 256 * 1024
+		defaultMentatBandwidthInterval = 90
+		defaultMentatBandwidthJitter   = 30
 		defaultMentatBandwidthTimeout  = 30
 	)
 
@@ -637,6 +639,9 @@ func (c *Config) applyMultiDefaults() {
 			if spec.Addons.Mentat.BandwidthIntervalSeconds == 0 {
 				spec.Addons.Mentat.BandwidthIntervalSeconds = defaultMentatBandwidthInterval
 			}
+			if spec.Addons.Mentat.BandwidthJitterSeconds == 0 {
+				spec.Addons.Mentat.BandwidthJitterSeconds = defaultMentatBandwidthJitter
+			}
 			if spec.Addons.Mentat.BandwidthTimeoutSeconds == 0 {
 				spec.Addons.Mentat.BandwidthTimeoutSeconds = defaultMentatBandwidthTimeout
 			}
@@ -792,6 +797,9 @@ func (c *Config) validateClusters() error {
 			if mentat.SleepSeconds <= 0 || mentat.PingAttempts <= 0 || mentat.PingTimeoutSeconds <= 0 ||
 				mentat.BandwidthBytes <= 0 || mentat.BandwidthIntervalSeconds <= 0 || mentat.BandwidthTimeoutSeconds <= 0 {
 				return fmt.Errorf("clusters[%d] (%s): mentat probe intervals, counts, sizes, and timeouts must be positive", i, spec.Name)
+			}
+			if mentat.BandwidthJitterSeconds < 0 {
+				return fmt.Errorf("clusters[%d] (%s): addons.mentat.bandwidth_jitter_seconds must be non-negative", i, spec.Name)
 			}
 			if mentat.BandwidthPort < 1 || mentat.BandwidthPort > 65535 {
 				return fmt.Errorf("clusters[%d] (%s): addons.mentat.bandwidth_port must be in range 1–65535", i, spec.Name)

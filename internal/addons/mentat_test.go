@@ -18,6 +18,7 @@ func TestRenderMentatCoreManifestIncludesNetworkProbeSettings(t *testing.T) {
 		BandwidthPort:            3113,
 		BandwidthBytes:           1048576,
 		BandwidthIntervalSeconds: 45,
+		BandwidthJitterSeconds:   20,
 		BandwidthTimeoutSeconds:  15,
 	})
 
@@ -29,6 +30,7 @@ func TestRenderMentatCoreManifestIncludesNetworkProbeSettings(t *testing.T) {
 		"name: PING_ATTEMPTS\n          value: \"4\"",
 		"name: BANDWIDTH_BYTES\n          value: \"1048576\"",
 		"name: BANDWIDTH_INTERVAL_SECONDS\n          value: \"45\"",
+		"name: BANDWIDTH_JITTER_SECONDS\n          value: \"20\"",
 	} {
 		if !strings.Contains(manifest, expected) {
 			t.Errorf("rendered manifest does not contain %q", expected)
