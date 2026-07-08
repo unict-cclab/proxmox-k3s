@@ -179,6 +179,14 @@ clusters:
       #   # version: "2.7.1"
       #   dashboard_node_port: 32300
 
+      # Custom Pod Autoscaler operator — enabled by default; installs the
+      # CustomPodAutoscaler CRD. Uncomment to override or set enabled: false.
+      # custom_pod_autoscaler:
+      #   enabled: false
+      #   # version: "v1.4.2"
+      #   # release: custom-pod-autoscaler-operator
+      #   # namespace: default
+
       # Mentat — inter-node latency, packet loss, and bandwidth measurement
       # mentat:
       #   enabled: true

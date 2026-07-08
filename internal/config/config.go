@@ -84,6 +84,7 @@ type ClusterAddons struct {
 	Kiali       KialiConfig         `yaml:"kiali"`
 	NFS         NFSAddonConfig      `yaml:"nfs"`
 	ChaosMesh   ChaosMeshConfig     `yaml:"chaos_mesh"`
+	CPAOperator CPAOperatorConfig   `yaml:"custom_pod_autoscaler"`
 	Mentat      MentatConfig        `yaml:"mentat"`
 	Registry    *ClusterRegistryRef `yaml:"registry,omitempty"`
 }
@@ -190,6 +191,19 @@ type ChaosMeshConfig struct {
 	Enabled           bool   `yaml:"enabled"`
 	Version           string `yaml:"version"`
 	DashboardNodePort int    `yaml:"dashboard_node_port"` // NodePort for the dashboard (port 2333), default 32300
+}
+
+// CPAOperatorConfig configures the Custom Pod Autoscaler operator installation.
+// Enabled defaults to true; set enabled: false to skip installing the operator.
+type CPAOperatorConfig struct {
+	Enabled   *bool  `yaml:"enabled"`
+	Version   string `yaml:"version"`   // Helm chart/operator version, default "v1.4.2"
+	Release   string `yaml:"release"`   // Helm release name, default "custom-pod-autoscaler-operator"
+	Namespace string `yaml:"namespace"` // Helm release namespace, default "default"
+}
+
+func (c CPAOperatorConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // MentatConfig configures the mentat inter-node network measurement DaemonSet.
@@ -448,6 +462,9 @@ func (c *Config) applyMultiDefaults() {
 		defaultNFSDataDir              = "/data/nfs"
 		defaultNFSExportSubnet         = "*"
 		defaultChaosMeshVersion        = "2.7.1"
+		defaultCPAOperatorVersion      = "v1.4.2"
+		defaultCPAOperatorRelease      = "custom-pod-autoscaler-operator"
+		defaultCPAOperatorNamespace    = "default"
 		defaultMentatVersion           = "v0.3.0"
 		defaultMentatSleep             = 5
 		defaultMentatPingAttempts      = 5
@@ -615,6 +632,17 @@ func (c *Config) applyMultiDefaults() {
 			}
 			if spec.Addons.ChaosMesh.DashboardNodePort == 0 {
 				spec.Addons.ChaosMesh.DashboardNodePort = 32300
+			}
+		}
+		if spec.Addons.CPAOperator.IsEnabled() {
+			if spec.Addons.CPAOperator.Version == "" {
+				spec.Addons.CPAOperator.Version = defaultCPAOperatorVersion
+			}
+			if spec.Addons.CPAOperator.Release == "" {
+				spec.Addons.CPAOperator.Release = defaultCPAOperatorRelease
+			}
+			if spec.Addons.CPAOperator.Namespace == "" {
+				spec.Addons.CPAOperator.Namespace = defaultCPAOperatorNamespace
 			}
 		}
 		if spec.Addons.Mentat.Enabled {
@@ -791,6 +819,11 @@ func (c *Config) validateClusters() error {
 		}
 		if p := spec.Addons.ChaosMesh.DashboardNodePort; p != 0 && (p < 30000 || p > 32767) {
 			return fmt.Errorf("clusters[%d] (%s): addons.chaos_mesh.dashboard_node_port must be 0 or in range 30000–32767", i, spec.Name)
+		}
+		if spec.Addons.CPAOperator.IsEnabled() {
+			if spec.Addons.CPAOperator.Version == "" || spec.Addons.CPAOperator.Release == "" || spec.Addons.CPAOperator.Namespace == "" {
+				return fmt.Errorf("clusters[%d] (%s): addons.custom_pod_autoscaler version, release, and namespace are required when enabled", i, spec.Name)
+			}
 		}
 		if spec.Addons.Mentat.Enabled {
 			mentat := spec.Addons.Mentat

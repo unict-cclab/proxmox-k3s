@@ -533,6 +533,12 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 		}
 	}
 
+	if st.spec.Addons.CPAOperator.IsEnabled() {
+		if err := addons.InstallCPAOperator(runner, st.spec.Addons.CPAOperator, st.spec.Name, out); err != nil {
+			return err
+		}
+	}
+
 	if st.spec.Addons.Mentat.Enabled {
 		if err := addons.InstallMentat(runner, st.spec.Addons.Mentat, st.spec.Name, st.spec.Addons.Monitoring.Enabled, out); err != nil {
 			return err
