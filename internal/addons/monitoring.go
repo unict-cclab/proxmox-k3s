@@ -186,6 +186,17 @@ data:
             "current": {"selected": true, "text": "1m", "value": "1m"},
             "multi": false,
             "includeAll": false
+          },
+          {
+            "name": "scheduler_profile",
+            "type": "query",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "query": "label_values(scheduler_schedule_attempts_total, profile)",
+            "refresh": 1,
+            "sort": 1,
+            "multi": true,
+            "includeAll": true,
+            "current": {"selected": true, "text": "All", "value": "$__all"}
           }
         ]
       },
@@ -199,7 +210,7 @@ data:
             {
               "refId": "A",
               "legendFormat": "ingress",
-              "expr": "sum(rate(istio_requests_total{reporter=\"destination\",destination_workload_namespace=~\"$namespace\",source_workload=\"istio-gateway-istio\",destination_workload=\"frontend\"}[1m]) * on(destination_workload_namespace,destination_workload) group_left(label_group) label_replace(label_replace(kube_deployment_labels{namespace=~\"$namespace\",label_group=~\"$group\"} @ end(), \"destination_workload\", \"$1\", \"deployment\", \"(.*)\"), \"destination_workload_namespace\", \"$1\", \"namespace\", \"(.*)\"))"
+              "expr": "sum(rate(istio_requests_total{reporter=\"destination\",destination_workload_namespace=~\"$namespace\",source_workload=~\"istio-gateway-istio|gateway-.*\",destination_workload=\"frontend\"}[1m]) * on(destination_workload_namespace,destination_workload) group_left(label_group) label_replace(label_replace(kube_deployment_labels{namespace=~\"$namespace\",label_group=~\"$group\"} @ end(), \"destination_workload\", \"$1\", \"deployment\", \"(.*)\"), \"destination_workload_namespace\", \"$1\", \"namespace\", \"(.*)\"))"
             }
           ],
           "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
@@ -229,7 +240,7 @@ data:
             {
               "refId": "A",
               "legendFormat": "ingress",
-              "expr": "sum(rate(istio_requests_total{reporter=\"destination\",destination_workload_namespace=~\"$namespace\",source_workload=\"istio-gateway-istio\",destination_workload=\"frontend\",response_code!~\"2..|3..\"}[1m]) * on(destination_workload_namespace,destination_workload) group_left(label_group) label_replace(label_replace(kube_deployment_labels{namespace=~\"$namespace\",label_group=~\"$group\"} @ end(), \"destination_workload\", \"$1\", \"deployment\", \"(.*)\"), \"destination_workload_namespace\", \"$1\", \"namespace\", \"(.*)\"))"
+              "expr": "sum(rate(istio_requests_total{reporter=\"destination\",destination_workload_namespace=~\"$namespace\",source_workload=~\"istio-gateway-istio|gateway-.*\",destination_workload=\"frontend\",response_code!~\"2..|3..\"}[1m]) * on(destination_workload_namespace,destination_workload) group_left(label_group) label_replace(label_replace(kube_deployment_labels{namespace=~\"$namespace\",label_group=~\"$group\"} @ end(), \"destination_workload\", \"$1\", \"deployment\", \"(.*)\"), \"destination_workload_namespace\", \"$1\", \"namespace\", \"(.*)\"))"
             }
           ],
           "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
@@ -259,7 +270,7 @@ data:
             {
               "refId": "A",
               "legendFormat": "ingress",
-              "expr": "histogram_quantile(0.95, sum by (le) (rate(istio_request_duration_milliseconds_bucket{reporter=\"destination\",destination_workload_namespace=~\"$namespace\",source_workload=\"istio-gateway-istio\",destination_workload=\"frontend\"}[$p95_window]) * on(destination_workload_namespace,destination_workload) group_left(label_group) label_replace(label_replace(kube_deployment_labels{namespace=~\"$namespace\",label_group=~\"$group\"} @ end(), \"destination_workload\", \"$1\", \"deployment\", \"(.*)\"), \"destination_workload_namespace\", \"$1\", \"namespace\", \"(.*)\")))"
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(istio_request_duration_milliseconds_bucket{reporter=\"destination\",destination_workload_namespace=~\"$namespace\",source_workload=~\"istio-gateway-istio|gateway-.*\",destination_workload=\"frontend\"}[$p95_window]) * on(destination_workload_namespace,destination_workload) group_left(label_group) label_replace(label_replace(kube_deployment_labels{namespace=~\"$namespace\",label_group=~\"$group\"} @ end(), \"destination_workload\", \"$1\", \"deployment\", \"(.*)\"), \"destination_workload_namespace\", \"$1\", \"namespace\", \"(.*)\")))"
             }
           ],
           "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
@@ -368,6 +379,101 @@ data:
             }
           ],
           "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 13,
+          "title": "Scheduler Attempts",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{profile}} / {{result}}",
+              "expr": "sum by (profile, result) (rate(scheduler_schedule_attempts_total{profile=~\"$scheduler_profile\"}[1m]))"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 14,
+          "title": "Scheduling Attempt P95",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{profile}} / {{result}}",
+              "expr": "histogram_quantile(0.95, sum by (profile, result, le) (rate(scheduler_scheduling_attempt_duration_seconds_bucket{profile=~\"$scheduler_profile\"}[1m])))"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 15,
+          "title": "Pod Scheduling SLI P95",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 56},
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{attempts}} attempts",
+              "expr": "histogram_quantile(0.95, sum by (attempts, le) (rate(scheduler_pod_scheduling_sli_duration_seconds_bucket[1m])))"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 16,
+          "title": "Scheduler Framework Extension P95",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 56},
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{profile}} / {{extension_point}} / {{status}}",
+              "expr": "histogram_quantile(0.95, sum by (profile, extension_point, status, le) (rate(scheduler_framework_extension_point_duration_seconds_bucket{profile=~\"$scheduler_profile\"}[1m])))"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 17,
+          "title": "Descheduler Evictions",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 64},
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{profile}} / {{strategy}} / {{result}}",
+              "expr": "sum by (profile, strategy, result) (rate(descheduler_pods_evicted_total{namespace=~\"$namespace\"}[1m]))"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 18,
+          "title": "Descheduler Duration P95",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 64},
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "loop",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(descheduler_loop_duration_seconds_bucket[1m]))) or histogram_quantile(0.95, sum by (le) (rate(descheduler_descheduler_loop_duration_seconds_bucket[1m])))"
+            },
+            {
+              "refId": "B",
+              "legendFormat": "{{profile}} / {{strategy}}",
+              "expr": "histogram_quantile(0.95, sum by (profile, strategy, le) (rate(descheduler_strategy_duration_seconds_bucket[1m]))) or histogram_quantile(0.95, sum by (profile, strategy, le) (rate(descheduler_descheduler_strategy_duration_seconds_bucket[1m])))"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
           "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
         }
       ]
