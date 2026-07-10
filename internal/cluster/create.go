@@ -527,6 +527,10 @@ func installAddons(cfg *config.Config, st *clusterState, out io.Writer) error {
 		}
 	}
 
+	if err := addons.InstallPVCs(runner, st.spec.PVCs, st.spec.Name, out); err != nil {
+		return err
+	}
+
 	if st.spec.Addons.ChaosMesh.Enabled {
 		if err := addons.InstallChaosMesh(runner, st.spec.Addons.ChaosMesh, st.spec.Name, out); err != nil {
 			return err

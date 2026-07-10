@@ -168,10 +168,8 @@ clusters:
       # NFS CSI driver — references a pre-existing NFS server
       nfs:
         enabled: true
-        # version: "v4.9.0"
         server: 192.168.1.51
         data_dir: /data/nfs
-        # export_subnet: "*"
 
       # Chaos Mesh — fault injection testing
       # chaos_mesh:
@@ -199,6 +197,14 @@ clusters:
       #   # bandwidth_interval_seconds: 90
       #   # bandwidth_jitter_seconds: 30
       #   # bandwidth_timeout_seconds: 30
+
+    # PersistentVolumeClaims are created after storage addons are installed.
+    # Only name, namespace, storageClass, and size are configurable.
+    pvcs:
+      - name: application-data
+        namespace: default
+        storageClass: nfs
+        size: 10Gi
 
     control_plane:
       - name: cp-01

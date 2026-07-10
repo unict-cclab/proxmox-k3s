@@ -67,9 +67,18 @@ type ClusterSpec struct {
 	PodCIDR        string        `yaml:"pod_cidr"`
 	ServiceCIDR    string        `yaml:"service_cidr"`
 	Addons         ClusterAddons `yaml:"addons"`
+	PVCs           []PVCConfig   `yaml:"pvcs,omitempty"`
 	K3s            K3sConfig     `yaml:"k3s"`
 	ControlPlane   []CPNode      `yaml:"control_plane"`
 	Workers        []WorkerNode  `yaml:"workers"`
+}
+
+// PVCConfig describes a PersistentVolumeClaim created after cluster addons.
+type PVCConfig struct {
+	Name         string `yaml:"name"`
+	Namespace    string `yaml:"namespace"`
+	StorageClass string `yaml:"storageClass"`
+	Size         string `yaml:"size"`
 }
 
 // ClusterAddons groups optional per-cluster addon configurations.
@@ -799,6 +808,17 @@ func (c *Config) validateClusters() error {
 	}
 
 	for i, spec := range c.Clusters {
+		seenPVCs := make(map[string]bool)
+		for j, pvc := range spec.PVCs {
+			if pvc.Name == "" || pvc.Namespace == "" || pvc.StorageClass == "" || pvc.Size == "" {
+				return fmt.Errorf("clusters[%d] (%s): pvcs[%d] name, namespace, storageClass, and size are required", i, spec.Name, j)
+			}
+			key := pvc.Namespace + "/" + pvc.Name
+			if seenPVCs[key] {
+				return fmt.Errorf("clusters[%d] (%s): duplicate PVC %q", i, spec.Name, key)
+			}
+			seenPVCs[key] = true
+		}
 		if spec.Addons.NFS.Enabled && spec.Addons.NFS.Server == "" {
 			return fmt.Errorf("clusters[%d] (%s): addons.nfs.enabled requires addons.nfs.server to be set", i, spec.Name)
 		}
