@@ -1,4 +1,4 @@
-# cluster.example.yaml — reference config with all available options
+# cluster.example.yaml — multi-cluster reference with all applicable options
 # Copy to cluster.yaml (the default config path) and fill in your values.
 #
 # The two-file split (shared.yaml + clusters.yaml) is optional.
@@ -58,6 +58,9 @@ registry:
   vm:
     name: harbor
     proxmox_node: pve
+    # template: ubuntu-24.04-template  # overrides template.name
+    # storage: local-lvm              # overrides template.storage
+    # bridge: vmbr0                    # overrides template.bridge
     cores: 4
     memory: 8192
     disk_size: 80
@@ -126,7 +129,7 @@ clusters:
       # installer labels the default namespace with mon-agent/enabled=true.
       mon_agent:
         enabled: true
-        # version: "v0.0.6"
+        # version: "v0.0.7"
         # prometheus_url: "http://prometheus-stack-kube-prom-prometheus.observability:9090"
         # scrape_period_seconds: 30
         # promql_range: "5m"
@@ -135,7 +138,7 @@ clusters:
       # cluster-lens topology UI, exposed through a NodePort.
       cluster_lens:
         enabled: true
-        # version: "v0.0.5"
+        # version: "v0.0.6"
         node_port: 32088
         # refresh: "2s"
 
@@ -168,8 +171,10 @@ clusters:
       # NFS CSI driver — references a pre-existing NFS server
       nfs:
         enabled: true
+        # version: "..."              # omit to use the built-in default
         server: 192.168.1.51
         data_dir: /data/nfs
+        # export_subnet: "*"
 
       # Chaos Mesh — fault injection testing
       # chaos_mesh:
@@ -188,7 +193,7 @@ clusters:
       # Mentat — inter-node latency, packet loss, and bandwidth measurement
       # mentat:
       #   enabled: true
-      #   # version: "v0.3.0"
+      #   # version: "v0.3.2"
       #   # sleep_seconds: 5
       #   # ping_attempts: 5
       #   # ping_timeout_seconds: 1
@@ -210,6 +215,8 @@ clusters:
       - name: cp-01
         template: ubuntu-24.04-template
         proxmox_node: pve
+        # storage: local-lvm
+        # bridge: vmbr0
         cores: 4
         memory: 8192
         disk_size: 40
@@ -227,6 +234,8 @@ clusters:
       - name: worker-01
         template: ubuntu-24.04-template
         proxmox_node: pve
+        # storage: local-lvm
+        # bridge: vmbr0
         cores: 4
         memory: 8192
         disk_size: 40
