@@ -101,6 +101,7 @@ prometheus:
     type: NodePort
     nodePort: %d
   prometheusSpec:
+    enableAdminAPI: true
     retention: 7d
     scrapeInterval: "5s"
     affinity:
