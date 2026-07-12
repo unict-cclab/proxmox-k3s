@@ -461,7 +461,7 @@ func (c *Config) applyMultiDefaults() {
 		defaultCiliumVersion           = "1.19.4"
 		defaultMonitoringVersion       = "84.5.0"
 		defaultMonAgentVersion         = "v0.0.7"
-		defaultClusterLensVersion      = "v0.0.6"
+		defaultClusterLensVersion      = "v0.0.7"
 		defaultLokiVersion             = "6.41.1"
 		defaultAlloyVersion            = "1.4.0"
 		defaultIstioVersion            = "1.30.0"
