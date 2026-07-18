@@ -193,7 +193,7 @@ clusters:
       # Mentat — inter-node latency, packet loss, and bandwidth measurement
       # mentat:
       #   enabled: true
-      #   # version: "v0.3.2"
+      #   # version: "v0.3.3"
       #   # sleep_seconds: 5
       #   # ping_attempts: 5
       #   # ping_timeout_seconds: 1

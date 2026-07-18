@@ -474,7 +474,7 @@ func (c *Config) applyMultiDefaults() {
 		defaultCPAOperatorVersion      = "v1.4.2"
 		defaultCPAOperatorRelease      = "custom-pod-autoscaler-operator"
 		defaultCPAOperatorNamespace    = "default"
-		defaultMentatVersion           = "v0.3.2"
+		defaultMentatVersion           = "v0.3.3"
 		defaultMentatSleep             = 5
 		defaultMentatPingAttempts      = 5
 		defaultMentatPingTimeout       = 1
